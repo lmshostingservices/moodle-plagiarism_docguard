@@ -1,0 +1,171 @@
+<?php
+
+namespace plagiarism_docguard\privacy;
+
+defined('MOODLE_INTERNAL') || die();
+
+use core_privacy\local\metadata\collection;
+use core_privacy\local\request\approved_contextlist;
+use core_privacy\local\request\approved_userlist;
+use core_privacy\local\request\contextlist;
+use core_privacy\local\request\userlist;
+use core_privacy\local\request\plugin\provider as plugin_provider;
+use core_privacy\local\request\core_userlist_provider;
+use core_privacy\local\metadata\provider as metadata_provider;
+use core_privacy\local\request\writer;
+
+/**
+ * Privacy provider for plagiarism_docguard.
+ *
+ * DocGuard stores per-file submission records (plagiarism_docguard_sub) and
+ * per-section analysis records (plagiarism_docguard_sec). Both tables contain
+ * userid references and extracted/analysed text so they are subject to GDPR
+ * data subject access and erasure requests.
+ *
+ * @package    plagiarism_docguard
+ * @copyright  2026 EssayGraderAI
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+class provider implements metadata_provider, plugin_provider, core_userlist_provider {
+
+    public static function get_metadata(collection $collection): collection {
+        $collection->add_database_table('plagiarism_docguard_sub', [
+            'userid'            => 'privacy:metadata:docguard_sub:userid',
+            'cmid'              => 'privacy:metadata:docguard_sub:cmid',
+            'filename'          => 'privacy:metadata:docguard_sub:filename',
+            'overall_riskscore' => 'privacy:metadata:docguard_sub:overall_riskscore',
+            'overall_risklevel' => 'privacy:metadata:docguard_sub:overall_risklevel',
+            'status'            => 'privacy:metadata:docguard_sub:status',
+            'normtext'          => 'privacy:metadata:docguard_sub:normtext',
+            'timecreated'       => 'privacy:metadata:docguard_sub:timecreated',
+        ], 'privacy:metadata:docguard_sub');
+
+        $collection->add_database_table('plagiarism_docguard_sec', [
+            'subid'      => 'privacy:metadata:docguard_sec:subid',
+            'sectionnum' => 'privacy:metadata:docguard_sec:sectionnum',
+            'riskscore'  => 'privacy:metadata:docguard_sec:riskscore',
+            'risklevel'  => 'privacy:metadata:docguard_sec:risklevel',
+            'sectiontext'=> 'privacy:metadata:docguard_sec:sectiontext',
+        ], 'privacy:metadata:docguard_sec');
+
+        return $collection;
+    }
+
+    public static function get_contexts_for_userid(int $userid): contextlist {
+        global $DB;
+        $contextlist = new contextlist();
+        $sql = "SELECT DISTINCT contextid
+                  FROM {plagiarism_docguard_sub}
+                 WHERE userid = :userid";
+        $contextlist->add_from_sql($sql, ['userid' => $userid]);
+        return $contextlist;
+    }
+
+    public static function get_users_in_context(userlist $userlist): void {
+        $context = $userlist->get_context();
+        if ($context->contextlevel !== CONTEXT_MODULE) {
+            return;
+        }
+        $sql = "SELECT userid
+                  FROM {plagiarism_docguard_sub}
+                 WHERE contextid = :contextid";
+        $userlist->add_from_sql('userid', $sql, ['contextid' => $context->id]);
+    }
+
+    public static function export_user_data(approved_contextlist $contextlist): void {
+        global $DB;
+
+        $userid = $contextlist->get_user()->id;
+        foreach ($contextlist->get_contexts() as $context) {
+            $subs = $DB->get_records('plagiarism_docguard_sub', [
+                'userid'    => $userid,
+                'contextid' => $context->id,
+            ]);
+            if (!$subs) {
+                continue;
+            }
+            $export = [];
+            foreach ($subs as $sub) {
+                $sections = $DB->get_records('plagiarism_docguard_sec', ['subid' => $sub->id]);
+                $export[] = [
+                    'filename'          => $sub->filename,
+                    'filetype'          => $sub->filetype,
+                    'overall_riskscore' => $sub->overall_riskscore,
+                    'overall_risklevel' => $sub->overall_risklevel,
+                    'status'            => $sub->status,
+                    'timecreated'       => transform::datetime($sub->timecreated),
+                    'sections'          => array_values(array_map(function($sec) {
+                        return [
+                            'sectionnum' => $sec->sectionnum,
+                            'riskscore'  => $sec->riskscore,
+                            'risklevel'  => $sec->risklevel,
+                        ];
+                    }, $sections)),
+                ];
+            }
+            writer::with_context($context)->export_data(
+                [get_string('pluginname', 'plagiarism_docguard')],
+                (object)['submissions' => $export]
+            );
+        }
+    }
+
+    public static function delete_data_for_all_users_in_context(\context $context): void {
+        global $DB;
+        if ($context->contextlevel !== CONTEXT_MODULE) {
+            return;
+        }
+        $subids = $DB->get_fieldset_select(
+            'plagiarism_docguard_sub', 'id',
+            'contextid = :contextid',
+            ['contextid' => $context->id]
+        );
+        if ($subids) {
+            list($in, $params) = $DB->get_in_or_equal($subids, SQL_PARAMS_NAMED);
+            $DB->delete_records_select('plagiarism_docguard_sec', "subid $in", $params);
+            $DB->delete_records('plagiarism_docguard_sub', ['contextid' => $context->id]);
+        }
+    }
+
+    public static function delete_data_for_user(approved_contextlist $contextlist): void {
+        global $DB;
+        $userid = $contextlist->get_user()->id;
+        foreach ($contextlist->get_contexts() as $context) {
+            $subids = $DB->get_fieldset_select(
+                'plagiarism_docguard_sub', 'id',
+                'userid = :userid AND contextid = :contextid',
+                ['userid' => $userid, 'contextid' => $context->id]
+            );
+            if ($subids) {
+                list($in, $params) = $DB->get_in_or_equal($subids, SQL_PARAMS_NAMED);
+                $DB->delete_records_select('plagiarism_docguard_sec', "subid $in", $params);
+                $DB->delete_records_select('plagiarism_docguard_sub',
+                    "id $in", $params);
+            }
+        }
+    }
+
+    public static function delete_data_for_users(approved_userlist $userlist): void {
+        global $DB;
+        $context = $userlist->get_context();
+        if ($context->contextlevel !== CONTEXT_MODULE) {
+            return;
+        }
+        $userids = $userlist->get_userids();
+        if (!$userids) {
+            return;
+        }
+        list($in, $params) = $DB->get_in_or_equal($userids, SQL_PARAMS_NAMED);
+        $params['contextid'] = $context->id;
+        $subids = $DB->get_fieldset_select(
+            'plagiarism_docguard_sub', 'id',
+            "userid $in AND contextid = :contextid",
+            $params
+        );
+        if ($subids) {
+            list($in2, $params2) = $DB->get_in_or_equal($subids, SQL_PARAMS_NAMED);
+            $DB->delete_records_select('plagiarism_docguard_sec', "subid $in2", $params2);
+            $DB->delete_records_select('plagiarism_docguard_sub', "id $in2", $params2);
+        }
+    }
+}

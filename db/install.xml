@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<XMLDB PATH="plagiarism/docguard/db" VERSION="2026051200001" COMMENT="XMLDB file for DocGuard"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="../../../lib/xmldb/xmldb.xsd">
+    <TABLES>
+
+        <TABLE NAME="plagiarism_docguard_sub" COMMENT="One record per analysed file submission">
+            <FIELDS>
+                <FIELD NAME="id"                TYPE="int"    LENGTH="10"  NOTNULL="true"  SEQUENCE="true"/>
+                <FIELD NAME="userid"            TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="cmid"              TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="contextid"         TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="submissionid"      TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="filename"          TYPE="char"   LENGTH="512" NOTNULL="true"/>
+                <FIELD NAME="filetype"          TYPE="char"   LENGTH="16"  NOTNULL="true"/>
+                <FIELD NAME="contenthash"       TYPE="char"   LENGTH="40"  NOTNULL="true"/>
+                <FIELD NAME="section_count"     TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="overall_riskscore" TYPE="number" LENGTH="6"   DECIMALS="2"    NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="overall_risklevel" TYPE="char"   LENGTH="16"  NOTNULL="true"  DEFAULT="low"/>
+                <FIELD NAME="status"            TYPE="char"   LENGTH="16"  NOTNULL="true"  DEFAULT="pending"/>
+                <FIELD NAME="analysisjson"      TYPE="text"   NOTNULL="false"/>
+                <FIELD NAME="normtext"          TYPE="text"   NOTNULL="false"/>
+                <FIELD NAME="errormsg"          TYPE="text"   NOTNULL="false"/>
+                <FIELD NAME="timecreated"       TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="timemodified"      TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+            </FIELDS>
+            <KEYS>
+                <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+            </KEYS>
+            <INDEXES>
+                <INDEX NAME="userid_cmid_ix"   UNIQUE="false" FIELDS="userid, cmid"/>
+                <INDEX NAME="contenthash_ix"   UNIQUE="false" FIELDS="contenthash"/>
+                <INDEX NAME="cmid_status_ix"   UNIQUE="false" FIELDS="cmid, status"/>
+            </INDEXES>
+        </TABLE>
+
+        <TABLE NAME="plagiarism_docguard_sec" COMMENT="Per-section (question) scores">
+            <FIELDS>
+                <FIELD NAME="id"            TYPE="int"    LENGTH="10"  NOTNULL="true"  SEQUENCE="true"/>
+                <FIELD NAME="subid"         TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="userid"        TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="cmid"          TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="section_num"   TYPE="int"    LENGTH="6"   NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="section_label" TYPE="char"   LENGTH="128" NOTNULL="true"/>
+                <FIELD NAME="section_text"  TYPE="text"   NOTNULL="false"/>
+                <FIELD NAME="wordcount"     TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="riskscore"     TYPE="number" LENGTH="6"   DECIMALS="2"    NOTNULL="true"  DEFAULT="0"/>
+                <FIELD NAME="risklevel"     TYPE="char"   LENGTH="16"  NOTNULL="true"  DEFAULT="low"/>
+                <FIELD NAME="signalsjson"   TYPE="text"   NOTNULL="false"/>
+                <FIELD NAME="timemodified"  TYPE="int"    LENGTH="10"  NOTNULL="true"  DEFAULT="0"/>
+            </FIELDS>
+            <KEYS>
+                <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+                <KEY NAME="subid_fk" TYPE="foreign" FIELDS="subid" REFTABLE="plagiarism_docguard_sub" REFFIELDS="id"/>
+            </KEYS>
+            <INDEXES>
+                <INDEX NAME="subid_secnum_ix" UNIQUE="true"  FIELDS="subid, section_num"/>
+                <INDEX NAME="cmid_ix"         UNIQUE="false" FIELDS="cmid"/>
+            </INDEXES>
+        </TABLE>
+
+    </TABLES>
+</XMLDB>

@@ -1,0 +1,189 @@
+.docguard-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    line-height: 1.4;
+    margin: 2px 0;
+    border: 1px solid transparent;
+    cursor: default;
+    position: relative;
+    text-decoration: none;
+}
+.docguard-badge[data-dg-tip]:hover::after {
+    content: attr(data-dg-tip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    z-index: 9999;
+    background: #1e293b;
+    color: #f1f5f9;
+    font-size: 0.72rem;
+    font-weight: 400;
+    letter-spacing: 0;
+    line-height: 1.5;
+    padding: 7px 11px;
+    border-radius: 5px;
+    width: 300px;
+    white-space: normal;
+    pointer-events: none;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
+.docguard-badge[data-dg-tip]:hover::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 1px);
+    left: 14px;
+    border: 5px solid transparent;
+    border-top-color: #1e293b;
+    pointer-events: none;
+}
+.docguard-badge-low {
+    background: #e8f5e9;
+    color: #1b5e20;
+    border-color: #a5d6a7;
+}
+.docguard-badge-medium {
+    background: #fff8e1;
+    color: #e65100;
+    border-color: #ffcc80;
+}
+.docguard-badge-high {
+    background: #ffebee;
+    color: #b71c1c;
+    border-color: #ef9a9a;
+}
+.docguard-badge-pending {
+    background: #f3f4f6;
+    color: #6b7280;
+    border-color: #d1d5db;
+}
+.docguard-badge-error {
+    background: #fdf2f8;
+    color: #6b21a8;
+    border-color: #d8b4fe;
+}
+.docguard-wrap {
+    margin: 4px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.docguard-link {
+    font-size: 0.78rem;
+    color: #555;
+    text-decoration: underline;
+    display: block;
+    margin-top: 2px;
+}
+.docguard-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+}
+.docguard-dot-low    { background: #2e7d32; }
+.docguard-dot-medium { background: #e65100; }
+.docguard-dot-high   { background: #b71c1c; }
+.docguard-dot-pending { background: #9ca3af; }
+.docguard-dot-error  { background: #7c3aed; }
+
+/* Report page */
+.docguard-report-header {
+    background: #1e3a5f;
+    color: #fff !important;
+    padding: 1.5rem 2rem;
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+}
+.docguard-report-header h2 { margin: 0 0 0.25rem; font-size: 1.4rem; color: #fff !important; }
+.docguard-report-header p  { margin: 0; opacity: 0.8; font-size: 0.9rem; color: #fff !important; }
+.docguard-report-header a  { color: #fff !important; }
+.docguard-report-header *  { color: #fff !important; }
+.docguard-section-card {
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    overflow: hidden;
+}
+.docguard-section-head {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+    font-weight: 600;
+}
+.docguard-section-body { padding: 1rem; }
+.docguard-signal-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.docguard-signal-table th {
+    text-align: left;
+    padding: 0.35rem 0.6rem;
+    border-bottom: 2px solid #e5e7eb;
+    color: #374151;
+    font-weight: 600;
+}
+.docguard-signal-table td {
+    padding: 0.35rem 0.6rem;
+    border-bottom: 1px solid #f3f4f6;
+    color: #374151;
+    vertical-align: top;
+}
+.docguard-signal-table tr:last-child td { border-bottom: none; }
+.docguard-signal-fired   { color: #b71c1c; font-weight: 600; }
+.docguard-signal-silent  { color: #6b7280; }
+.docguard-score-bar-wrap {
+    background: #f3f4f6;
+    border-radius: 4px;
+    height: 8px;
+    width: 120px;
+    display: inline-block;
+    vertical-align: middle;
+}
+.docguard-score-bar {
+    height: 8px;
+    border-radius: 4px;
+    display: block;
+}
+.docguard-score-bar-low    { background: #4caf50; }
+.docguard-score-bar-medium { background: #ff9800; }
+.docguard-score-bar-high   { background: #f44336; }
+.docguard-excerpt {
+    background: #f9fafb;
+    border-left: 3px solid #d1d5db;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.82rem;
+    color: #6b7280;
+    font-style: italic;
+    margin-top: 0.5rem;
+    border-radius: 0 4px 4px 0;
+    max-height: 80px;
+    overflow: hidden;
+}
+.docguard-similarity-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+}
+.docguard-similarity-table th {
+    text-align: left;
+    padding: 0.35rem 0.6rem;
+    background: #f3f4f6;
+    border-bottom: 2px solid #e5e7eb;
+    font-weight: 600;
+}
+.docguard-similarity-table td {
+    padding: 0.35rem 0.6rem;
+    border-bottom: 1px solid #f3f4f6;
+}
