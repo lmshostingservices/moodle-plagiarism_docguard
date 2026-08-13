@@ -1,4 +1,18 @@
 <?php
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 namespace plagiarism_docguard;
 
@@ -25,9 +39,11 @@ defined('MOODLE_INTERNAL') || die();
  * font → CMap correlation to fail entirely and raw glyph-index bytes to be
  * output as ASCII garbage.  The new two-phase approach keeps object structure
  * parsing completely separate from stream inflation.
+ * @package    plagiarism_docguard
+ * @copyright  2026 LMS-Labs
+ * @license    http://www.gnu.org/licenses/gpl-3.0.html GNU GPL v3 or later
  */
 class extractor {
-
     const SUPPORTED_MIMETYPES = [
         'application/pdf',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -669,7 +685,7 @@ class extractor {
      */
     private static function pdf_unescape(string $s): string {
         // Octal escapes: \nnn
-        $s = preg_replace_callback('/\\\\([0-7]{1,3})/', function($m) {
+        $s = preg_replace_callback('/\\\\([0-7]{1,3})/', function ($m) {
             return chr(octdec($m[1]));
         }, $s);
 
