@@ -24,9 +24,20 @@
 
 defined('MOODLE_INTERNAL') || die();
 
+// FIX-DG-VERSION-FREEZE (v1.0.78): Releases 1.0.74 to 1.0.77 all shipped the same
+// version integer, and db/upgrade.php still carries three separate savepoint blocks
+// guarded on it. Moodle only runs a plugin's install/upgrade — and therefore only
+// re-syncs db/access.php capabilities via update_capabilities() — when the integer
+// below INCREASES. On a site already holding that value, replacing the plugin files
+// had no effect whatsoever on capabilities or schema, producing "upgrades" that
+// silently changed nothing.
+//
+// Any future release that touches db/access.php or db/install.xml MUST raise this
+// number, and it must always be greater than or equal to the highest savepoint in
+// db/upgrade.php (currently 2026081500).
 $plugin->component = 'plagiarism_docguard';
-$plugin->version   = 2026072300;
-$plugin->release   = '1.0.77';
+$plugin->version   = 2026081500;
+$plugin->release   = '1.0.78';
 $plugin->requires  = 2022041900;
 $plugin->maturity  = MATURITY_STABLE;
 $plugin->supported = [400, 501];

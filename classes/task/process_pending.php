@@ -45,7 +45,11 @@ defined('MOODLE_INTERNAL') || die();
  *              that have no plagiarism_docguard_sub record at all, insert a
  *              pending record and run analysis.
  *
- * Capped at MAX_PER_RUN files per cron execution to avoid PHP timeouts.
+ * Capped at MAX_PER_RUN files per cron execution to avoid PHP timeouts. The task is
+ * scheduled hourly (db/tasks.php), so that is 15 files per hour by default.
+ *
+ * v1.0.78: Phase 2 is now opt-in and off by default — see the FIX-DG-BACKFILL-OPTIN
+ * note in execute(). Phase 1 is unconditional.
  *
  * @package    plagiarism_docguard
  * @copyright  2026 EssayGraderAI
@@ -108,6 +112,32 @@ class process_pending extends \core\task\scheduled_task {
             $fs   = get_file_storage();
             $file = $fs->get_file_by_id($filerecord->id);
             if (!$file || $file->is_directory()) {
+                // FIX-DG-PENDING-POISON-PILL (v1.0.78): this used to `continue`
+                // without changing the record, unlike the !$filerecord branch above
+                // which marks it error. Phase 1 selects status='pending' ordered by
+                // timecreated ASC and caps at MAX_PER_RUN, so an unretrievable file
+                // was re-selected first on every run forever, permanently consuming
+                // one of the 15 slots. Fifteen such records and no other student's
+                // submission is ever analysed again — the whole class sits on
+                // Pending with no breakdown. Mark it error so the queue drains and
+                // the teacher sees an actionable badge.
+                //
+                // Grace window first: get_file_by_id() can also return false
+                // transiently on sites using an alternative file system (S3/Azure),
+                // or while a file is still in the trashdir. Erroring on a five-second
+                // blip would be the opposite mistake, since nothing retries 'error'
+                // records automatically. Only records older than an hour are flipped.
+                if ($sub->timecreated > 0 && (time() - $sub->timecreated) < 3600) {
+                    mtrace("DocGuard process_pending [P1]: sub {$sub->id} — file not retrievable, within 1h grace, will retry.");
+                    continue;
+                }
+                $upd               = new \stdClass();
+                $upd->id           = $sub->id;
+                $upd->status       = 'error';
+                $upd->errormsg     = 'Stored file could not be retrieved from Moodle file storage.';
+                $upd->timemodified = time();
+                $DB->update_record('plagiarism_docguard_sub', $upd);
+                mtrace("DocGuard process_pending [P1]: sub {$sub->id} — file id {$filerecord->id} not retrievable, marked error.");
                 continue;
             }
 
@@ -132,8 +162,34 @@ class process_pending extends \core\task\scheduled_task {
         // submitted, the observer never fired and there is no DB record at all.
         // Detect these by cross-referencing assignsubmission_file submissions
         // against plagiarism_docguard_sub.
-        if ($processed < self::MAX_PER_RUN) {
-            $this->scan_untracked_files(self::MAX_PER_RUN - $processed, $processed);
+        //
+        // FIX-DG-BACKFILL-OPTIN (v1.0.78): Phase 2 is OFF by default.
+        //
+        // This phase was dead code in every prior release (see
+        // scan_untracked_files()), so no site has ever had it run. Repairing it
+        // without a gate would silently turn an inert task into a site-wide sweep of
+        // every historical assignment submission on the install — shelling out to
+        // pdftotext/gs per file and storing extracted text for every student who has
+        // ever submitted — on the strength of a point upgrade. That is not a change
+        // an administrator should discover after the fact.
+        //
+        // The reported fault (teachers unable to open the breakdown) does not depend
+        // on this phase: new submissions are handled by the event observer, stuck
+        // records by Phase 1 above, and a specific activity's backlog by the
+        // "Scan & Analyse Unprocessed Submissions" button on the class report.
+        if (!get_config('plagiarism_docguard', 'enablebackfill')) {
+            mtrace('DocGuard process_pending [P2]: historical backfill is disabled '
+                . '(Site administration → Plugins → DocGuard → "Analyse historical submissions"). Skipping.');
+        } else if ($processed < self::MAX_PER_RUN) {
+            // Isolated so it can never take Phase 1 down with it. An uncaught
+            // exception here fails the whole scheduled task, and Moodle then applies
+            // exponential fail-delay — backing the task off towards once a day and
+            // throttling Phase 1, which is the part that recovers stuck submissions.
+            try {
+                $this->scan_untracked_files(self::MAX_PER_RUN - $processed, $processed);
+            } catch (\Throwable $e) {
+                mtrace('DocGuard process_pending [P2]: ABORTED — ' . $e->getMessage());
+            }
         }
 
         mtrace("DocGuard process_pending: finished. Files processed this run: {$processed}.");
@@ -145,36 +201,85 @@ class process_pending extends \core\task\scheduled_task {
     private function scan_untracked_files(int $limit, int &$processed): void {
         global $DB, $CFG;
 
-        // Find CMs with per-activity DocGuard enabled.
-        $enabled_cms = $DB->get_fieldset_select(
-            'plagiarism_config',
-            'cm',
-            "plugin = 'docguard' AND name = 'plagiarism_docguard_enable' AND value = '1'"
-        );
-
-        // Also respect site-wide enable flags from plugin config.
-        $cfg = (array)get_config('plagiarism_docguard');
-        if (!empty($cfg['sitewide_assign_enable'])) {
-            // Site-wide on for assign — find all assign CMs not already in the list.
-            $all_assign_cms = $DB->get_fieldset_sql(
-                "SELECT cm.id
-                   FROM {course_modules} cm
-                   JOIN {modules} m ON m.id = cm.module AND m.name = 'assign'
-                  WHERE cm.deletioninprogress = 0"
-            );
-            $enabled_cms = array_unique(array_merge((array)$enabled_cms, $all_assign_cms));
+        // FIX-DG-BACKFILL-ENABLEMENT (v1.0.78): this whole phase was dead code, and
+        // making it live required three separate corrections.
+        //
+        // (1) Enablement source. It looked for enabled activities in
+        //     {plagiarism_config} (plugin='docguard', name='plagiarism_docguard_enable'),
+        //     a table DocGuard never writes to — enablement lives in
+        //     set_config('enabled_cm_<cmid>', …, 'plagiarism_docguard'). The site-wide
+        //     fallback checked 'sitewide_assign_enable', another key nothing ever
+        //     sets. $enabled_cms was therefore always empty and the task logged "no
+        //     DocGuard-enabled assign CMs found" and returned on every single run.
+        //
+        //     Rather than rebuild that list — which also diverges from rendering,
+        //     because plagiarism_docguard_is_cm_active() treats an ABSENT config key
+        //     as enabled, and would produce an unbounded IN clause on a site with
+        //     site-wide enablement on — each candidate row is now filtered through
+        //     plagiarism_docguard_is_cm_active() itself. Cron and the badge cannot
+        //     disagree, because they now ask the same function.
+        //
+        // (2) Ordering. The query fetched the NEWEST submissions site-wide
+        //     (ORDER BY timemodified DESC, limit 75). Those are precisely the ones
+        //     the observer already tracked, so every row was discarded by the
+        //     record_exists() check below and the phase made no progress, ever.
+        //     Untracked rows are now excluded in SQL via NOT EXISTS, so the window is
+        //     filled only with work that actually needs doing.
+        //
+        // (3) Table alias. {modules} was aliased as "mod", a reserved word on
+        //     MySQL/MariaDB (the modulo operator). This never surfaced because the
+        //     query was unreachable; the moment the phase went live it would have
+        //     thrown dml_read_exception on the majority of Moodle installs. Renamed
+        //     to "md". PostgreSQL would not have reproduced it.
+        // (4) Same gates the observer honours. classes/observer.php checks
+        //     is_cm_active() and check_unlock() before analysing anything; a cron
+        //     path that ignored them would analyse submissions on sites where an
+        //     administrator has switched plagiarism off, or that are not licensed.
+        if (empty($CFG->enableplagiarism)) {
+            mtrace('DocGuard process_pending [P2]: plagiarism is disabled site-wide — skipping.');
+            return;
         }
-
-        if (empty($enabled_cms)) {
-            mtrace("DocGuard process_pending [P2]: no DocGuard-enabled assign CMs found — skipping untracked scan.");
+        if (!\plagiarism_docguard_check_unlock()) {
+            mtrace('DocGuard process_pending [P2]: plugin is not unlocked — skipping.');
             return;
         }
 
         $fs = get_file_storage();
-        [$in_sql, $in_params] = $DB->get_in_or_equal($enabled_cms, SQL_PARAMS_NAMED, 'cm');
 
-        // Fetch recently-modified submitted files across enabled CMs.
-        // Only look at the "latest" submission per student (latest=1).
+        // (5) Exclude activities where DocGuard is EXPLICITLY switched off. This has
+        //     to be an exclusion list, not an inclusion list: is_cm_active() treats an
+        //     absent config key as enabled, so the enabled set is "all assigns" and
+        //     only the disabled set is enumerable. It is also normally tiny, so the
+        //     NOT IN clause stays small — the inclusion list this replaces would have
+        //     produced one placeholder per assign on the site.
+        $disabled_cms = [];
+        foreach ((array)get_config('plagiarism_docguard') as $key => $value) {
+            if (strpos($key, 'enabled_cm_') !== 0 || !empty($value)) {
+                continue;
+            }
+            $disabled_cmid = (int)substr($key, strlen('enabled_cm_'));
+            if ($disabled_cmid > 0) {
+                $disabled_cms[] = $disabled_cmid;
+            }
+        }
+        $notin_sql    = '';
+        $notin_params = [];
+        if (!empty($disabled_cms)) {
+            [$notin, $notin_params] = $DB->get_in_or_equal($disabled_cms, SQL_PARAMS_NAMED, 'dis', false);
+            $notin_sql = " AND cm.id $notin ";
+        }
+
+        // Oldest first: the case this phase exists for is a backlog of submissions
+        // made before the plugin was installed. New submissions are handled by the
+        // observer as they happen and do not need this path.
+        //
+        // asub.userid > 0 excludes group (team) submissions. Their assign_submission
+        // rows carry userid = 0 with the group in groupid, so the NOT EXISTS below —
+        // which keys on (cmid, userid) — would treat the first group processed as
+        // covering the whole activity and silently exclude every other group forever.
+        // The resulting records would also never be displayed, since get_links() looks
+        // rows up by the real student's user id. Group assignments are therefore left
+        // to the observer rather than half-handled here.
         $rows = $DB->get_records_sql(
             "SELECT af.id, af.submission, asub.userid, asub.assignment,
                     cm.id AS cmid, ctx.id AS contextid
@@ -184,19 +289,29 @@ class process_pending extends \core\task\scheduled_task {
                     AND asub.status = 'submitted'
                JOIN {assign} a ON a.id = asub.assignment
                JOIN {course_modules} cm ON cm.instance = a.id
-               JOIN {modules} mod ON mod.id = cm.module AND mod.name = 'assign'
+               JOIN {modules} md ON md.id = cm.module AND md.name = 'assign'
                JOIN {context} ctx ON ctx.instanceid = cm.id AND ctx.contextlevel = " . CONTEXT_MODULE . "
-              WHERE cm.id $in_sql
-              ORDER BY asub.timemodified DESC",
-            $in_params,
+              WHERE cm.deletioninprogress = 0
+                    $notin_sql
+                AND asub.userid > 0
+                AND NOT EXISTS (
+                        SELECT 1
+                          FROM {plagiarism_docguard_sub} dg
+                         WHERE dg.cmid = cm.id
+                           AND dg.userid = asub.userid
+                    )
+              ORDER BY asub.timemodified ASC",
+            $notin_params,
             0,
-            $limit * 5  // Fetch extra — most rows may already have DB records.
+            $limit * 5  // Head-room: some rows are still skipped by is_supported().
         );
 
         if (empty($rows)) {
-            mtrace("DocGuard process_pending [P2]: no submitted assign files found in enabled CMs.");
+            mtrace("DocGuard process_pending [P2]: no untracked submitted assign files found.");
             return;
         }
+
+        mtrace('DocGuard process_pending [P2]: ' . count($rows) . ' candidate untracked submission(s).');
 
         foreach ($rows as $row) {
             if ($processed >= self::MAX_PER_RUN) {
@@ -208,6 +323,13 @@ class process_pending extends \core\task\scheduled_task {
             $subid   = (int)$row->submission;
             $ctx     = (int)$row->contextid;
 
+            // FIX-DG-BACKFILL-ENABLEMENT (v1.0.78): ask the same function the badge
+            // asks, so cron never analyses an activity where DocGuard is switched
+            // off, and never skips one where the badge says it is on.
+            if (!\plagiarism_docguard_is_cm_active($cmid)) {
+                continue;
+            }
+
             $files = $fs->get_area_files(
                 $ctx,
                 'assignsubmission_file',
@@ -217,8 +339,13 @@ class process_pending extends \core\task\scheduled_task {
                 false
             );
 
+            $row_complete   = true;  // False if the per-run cap cut this row short.
+            $row_queued     = 0;
+            $row_supported  = 0;     // Supported files seen, regardless of outcome.
+
             foreach ($files as $file) {
                 if ($processed >= self::MAX_PER_RUN) {
+                    $row_complete = false;
                     break;
                 }
                 if ($file->is_directory()) {
@@ -228,9 +355,13 @@ class process_pending extends \core\task\scheduled_task {
                     continue;
                 }
 
+                $row_supported++;
                 $contenthash = $file->get_contenthash();
 
-                // Skip if a record (any status) already exists.
+                // Defence in depth. Unreachable in normal operation: the NOT EXISTS
+                // above already excluded this (cmid, userid) pair. Kept because it is
+                // the finer-grained check (it also keys on contenthash) and costs one
+                // indexed lookup on a row we are about to spend seconds analysing.
                 $existing = $DB->record_exists('plagiarism_docguard_sub', [
                     'cmid'        => $cmid,
                     'userid'      => $userid,
@@ -252,8 +383,54 @@ class process_pending extends \core\task\scheduled_task {
                         $ctx
                     );
                     $processed++;
+                    $row_queued++;
                 } catch (\Throwable $e) {
                     mtrace("DocGuard process_pending [P2]: ERROR user {$userid} cm {$cmid} file '{$file->get_filename()}' — " . $e->getMessage());
+                }
+            }
+
+            // FIX-DG-BACKFILL-TERMINATION (v1.0.78): make a permanent skip durable.
+            //
+            // Without this the phase cannot converge. The candidate query excludes
+            // rows that have a plagiarism_docguard_sub record, but a submission whose
+            // files are all unsupported (.odt, .txt, images) never gets one — so it
+            // stays a candidate forever, and because the ordering is oldest-first it
+            // deterministically occupies the head of the window on every run. A site
+            // with enough old unsupported submissions would log "N candidate
+            // untracked submission(s)" and process nothing, indefinitely.
+            //
+            // Writing a terminal 'unsupported' marker drops the row from the query
+            // permanently. render_badge() returns '' for this status, so nothing is
+            // shown to teachers or students. Only written when the row was examined
+            // in full — if the per-run cap cut it short, it is retried next run.
+            // Gated on $row_supported, not $row_queued: if a supported file was found
+            // but analyse_and_store() threw (a DB blip, a transient storage failure),
+            // writing "no supported files" would be false, permanent — nothing retries
+            // this status — and invisible, since render_badge() renders nothing for it.
+            // Those rows are left as candidates so the next run retries them.
+            if ($row_complete && $row_queued === 0 && $row_supported === 0) {
+                try {
+                    if (!$DB->record_exists('plagiarism_docguard_sub', ['cmid' => $cmid, 'userid' => $userid])) {
+                        $marker = new \stdClass();
+                        $marker->userid            = $userid;
+                        $marker->cmid              = $cmid;
+                        $marker->contextid         = $ctx;
+                        $marker->submissionid      = $subid;
+                        $marker->filename          = '';
+                        $marker->filetype          = 'unsupported';
+                        $marker->contenthash       = '';
+                        $marker->status            = 'unsupported';
+                        $marker->section_count     = 0;
+                        $marker->overall_riskscore = 0;
+                        $marker->overall_risklevel = 'low';
+                        $marker->errormsg          = 'No DocGuard-supported files (PDF/DOCX) in this submission.';
+                        $marker->timecreated       = time();
+                        $marker->timemodified      = time();
+                        $DB->insert_record('plagiarism_docguard_sub', $marker);
+                        mtrace("DocGuard process_pending [P2]: user {$userid} cm {$cmid} — no supported files, marked unsupported.");
+                    }
+                } catch (\Throwable $e) {
+                    mtrace("DocGuard process_pending [P2]: could not mark user {$userid} cm {$cmid} unsupported — " . $e->getMessage());
                 }
             }
         }

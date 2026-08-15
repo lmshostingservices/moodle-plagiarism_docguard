@@ -39,6 +39,8 @@ if (optional_param('save', false, PARAM_BOOL) && confirm_sesskey()) {
     set_config('enabled',         optional_param('enabled',         0,  PARAM_BOOL),        'plagiarism_docguard');
     set_config('retentiondays',   optional_param('retentiondays',   90, PARAM_INT),         'plagiarism_docguard');
     set_config('minsectionwords', optional_param('minsectionwords', 30, PARAM_INT),         'plagiarism_docguard');
+    // FIX-DG-BACKFILL-OPTIN (v1.0.78): off by default — see lang string.
+    set_config('enablebackfill',  optional_param('enablebackfill',  0,  PARAM_BOOL),        'plagiarism_docguard');
     set_config('unlock_cache_result', '', 'plagiarism_docguard');
     set_config('unlock_cache_time',   0,  'plagiarism_docguard');
     plagiarism_docguard_check_unlock();
@@ -63,6 +65,7 @@ $apikey          = $cfg['apikey']          ?? '';
 $enabled         = !empty($cfg['enabled']);
 $retentiondays   = (int)($cfg['retentiondays']   ?? 90);
 $minsectionwords = (int)($cfg['minsectionwords'] ?? 30);
+$enablebackfill  = !empty($cfg['enablebackfill']);
 
 $creds_configured = (!empty($siteid) || !empty(get_config('local_aiconfig', 'siteid')))
                  && (!empty($apikey) || !empty(get_config('local_aiconfig', 'apikey')));
@@ -132,6 +135,13 @@ $actionurl = new moodle_url('/plagiarism/docguard/settings.php');
                 <td class="cell c1">
                     <input type="number" id="id_minsectionwords" name="minsectionwords" value="<?php echo $minsectionwords; ?>" min="5" max="500">
                     <div class="form-text"><?php echo get_string('minsectionwords_desc', 'plagiarism_docguard'); ?></div>
+                </td>
+            </tr>
+            <tr>
+                <td class="cell c0"><label for="id_enablebackfill"><?php echo get_string('enablebackfill', 'plagiarism_docguard'); ?></label></td>
+                <td class="cell c1">
+                    <input type="checkbox" id="id_enablebackfill" name="enablebackfill" value="1" <?php echo $enablebackfill ? 'checked' : ''; ?>>
+                    <div class="form-text"><?php echo get_string('enablebackfill_desc', 'plagiarism_docguard'); ?></div>
                 </td>
             </tr>
             <tr>

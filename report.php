@@ -34,7 +34,14 @@ $cm   = get_coursemodule_from_id('', $cmid, 0, false, MUST_EXIST);
 
 require_login($cm->course, false, $cm);
 $context = context_module::instance($cmid);
-require_capability('plagiarism/docguard:viewreport', $context);
+// FIX-DG-REPORT-ACCESS (v1.0.78): Accept mod/assign:grade OR
+// plagiarism/docguard:viewreport — the same test lib.php uses to decide whether to
+// render the link to this page. Previously this required the DocGuard capability
+// alone, which db/access.php granted only to editing teachers and managers, so
+// non-editing teachers were shown a link and then denied.
+if (!plagiarism_docguard_can_view_reports($context)) {
+    require_capability('plagiarism/docguard:viewreport', $context);
+}
 
 // ── POST handler: scan this CM for untracked / pending submissions ────────────
 // ADD-DG-PROCESS-PENDING (v1.0.69): Teachers can trigger an immediate on-demand
@@ -139,7 +146,17 @@ $PAGE->requires->css('/plagiarism/docguard/styles.css');
 echo $OUTPUT->header();
 
 // Fetch all submissions for this cmid.
-$subs = $DB->get_records('plagiarism_docguard_sub', ['cmid' => $cmid], 'timemodified DESC');
+// FIX-DG-HIDE-UNSUPPORTED (v1.0.78): exclude the 'unsupported' bookkeeping rows the
+// backfill task writes to mark a submission as permanently skipped. They carry no
+// analysis, render nothing in the badge, and would otherwise appear here as a blank
+// filename with a grey "Pending" score and the raw word "unsupported" in the Risk
+// column, while inflating the Total Submissions count.
+$subs = $DB->get_records_select(
+    'plagiarism_docguard_sub',
+    'cmid = :cmid AND status <> :unsupported',
+    ['cmid' => $cmid, 'unsupported' => 'unsupported'],
+    'timemodified DESC'
+);
 
 $course     = get_course($cm->course);
 $modinfo    = get_fast_modinfo($cm->course);

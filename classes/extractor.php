@@ -91,7 +91,20 @@ class extractor {
             throw new \Exception('Unsupported file type: ' . $file->get_filename());
         }
 
-        $tmpfile = make_temp_directory('docguard') . '/' . clean_filename($file->get_filename());
+        // FIX-DG-TEMPFILE-COLLISION (v1.0.78): the temp path was built from the
+        // submitted filename alone. Two students submitting "assignment.pdf", or the
+        // observer and the cron task touching the same file concurrently, wrote to
+        // the same path — and the unlink() in the finally block below could delete
+        // the other worker's file mid-read, producing corrupt extractions or
+        // spurious errors. uniqid() makes each extraction independent.
+        // The uniqid prefix adds ~27 characters, so the original name is trimmed to
+        // keep the whole path component inside the 255-byte filesystem limit that
+        // ext4/XFS enforce — Moodle itself permits filenames up to 255 characters.
+        $basename = clean_filename($file->get_filename());
+        if (strlen($basename) > 120) {
+            $basename = substr($basename, -120);
+        }
+        $tmpfile = make_temp_directory('docguard') . '/' . uniqid('dg_', true) . '_' . $basename;
         $file->copy_content_to($tmpfile);
 
         try {
@@ -115,6 +128,23 @@ class extractor {
         }
         $zip = new \ZipArchive();
         if ($zip->open($filepath) !== true) {
+            // FIX-DG-LEGACY-DOC (v1.0.78): is_supported() accepts the 'doc'
+            // extension and filetype() maps it to 'docx', but a legacy OLE2 binary
+            // .doc is not a ZIP container, so ZipArchive always fails and every
+            // .doc submission produced the opaque error "Cannot open DOCX file"
+            // with no breakdown and nothing the teacher could act on. Detect the
+            // OLE2 magic number and say something useful instead.
+            $magic = '';
+            $fh    = @fopen($filepath, 'rb');
+            if ($fh) {
+                $magic = (string)fread($fh, 8);
+                fclose($fh);
+            }
+            if (strncmp($magic, "\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1", 8) === 0) {
+                // Kept under 120 characters: lib.php renders badge errors as
+                // substr($errmsg, 0, 120) and a longer message is cut mid-word.
+                throw new \Exception('Legacy .doc format is not supported. Ask the student to resubmit as .docx or PDF.');
+            }
             throw new \Exception('Cannot open DOCX file: ' . basename($filepath));
         }
         $xml = $zip->getFromName('word/document.xml');

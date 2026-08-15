@@ -27,6 +27,11 @@ use core_privacy\local\request\plugin\provider as plugin_provider;
 use core_privacy\local\request\core_userlist_provider;
 use core_privacy\local\metadata\provider as metadata_provider;
 use core_privacy\local\request\writer;
+// FIX-DG-PRIVACY-TRANSFORM (v1.0.78): export_user_data() calls transform::datetime()
+// but this class was never imported. Inside namespace plagiarism_docguard\privacy the
+// bare name resolved to \plagiarism_docguard\privacy\transform, which does not exist,
+// so any GDPR data export including DocGuard data died with "Class not found".
+use core_privacy\local\request\transform;
 
 /**
  * Privacy provider for plagiarism_docguard.
@@ -53,12 +58,16 @@ class provider implements metadata_provider, plugin_provider, core_userlist_prov
             'timecreated'       => 'privacy:metadata:docguard_sub:timecreated',
         ], 'privacy:metadata:docguard_sub');
 
+        // FIX-DG-PRIVACY-COLUMNS (v1.0.78): the array keys must be real column
+        // names. 'sectionnum'/'sectiontext' do not exist — db/install.xml declares
+        // section_num and section_text. The lang string identifiers (the values)
+        // are unchanged, so no language pack update is required.
         $collection->add_database_table('plagiarism_docguard_sec', [
-            'subid'      => 'privacy:metadata:docguard_sec:subid',
-            'sectionnum' => 'privacy:metadata:docguard_sec:sectionnum',
-            'riskscore'  => 'privacy:metadata:docguard_sec:riskscore',
-            'risklevel'  => 'privacy:metadata:docguard_sec:risklevel',
-            'sectiontext'=> 'privacy:metadata:docguard_sec:sectiontext',
+            'subid'        => 'privacy:metadata:docguard_sec:subid',
+            'section_num'  => 'privacy:metadata:docguard_sec:sectionnum',
+            'riskscore'    => 'privacy:metadata:docguard_sec:riskscore',
+            'risklevel'    => 'privacy:metadata:docguard_sec:risklevel',
+            'section_text' => 'privacy:metadata:docguard_sec:sectiontext',
         ], 'privacy:metadata:docguard_sec');
 
         return $collection;
@@ -109,7 +118,8 @@ class provider implements metadata_provider, plugin_provider, core_userlist_prov
                     'timecreated'       => transform::datetime($sub->timecreated),
                     'sections'          => array_values(array_map(function ($sec) {
                         return [
-                            'sectionnum' => $sec->sectionnum,
+                            // FIX-DG-PRIVACY-COLUMNS (v1.0.78): column is section_num.
+                            'sectionnum' => $sec->section_num,
                             'riskscore'  => $sec->riskscore,
                             'risklevel'  => $sec->risklevel,
                         ];

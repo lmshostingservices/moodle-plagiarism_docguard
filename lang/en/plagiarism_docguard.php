@@ -36,6 +36,8 @@ $string['retentiondays']         = 'Data retention (days)';
 $string['retentiondays_desc']    = 'How many days to retain analysis data. 0 = keep forever.';
 $string['minsectionwords']       = 'Minimum section words';
 $string['minsectionwords_desc']  = 'Minimum word count per section to include it in analysis. Sections shorter than this are skipped.';
+$string['enablebackfill']        = 'Analyse historical submissions (backfill)';
+$string['enablebackfill_desc']   = 'When enabled, the hourly DocGuard task also scans for assignment submissions made before DocGuard was installed and analyses them, up to 15 files per run. Leave this OFF unless you specifically want historical submissions processed: on a large site it will work through every past assignment submission, which takes considerable server time and stores extracted text for every student who has ever submitted. New submissions are always analysed automatically regardless of this setting, and teachers can trigger an on-demand scan for a single activity from the DocGuard class report at any time.';
 $string['savedconfigsuccess']    = 'DocGuard settings saved successfully.';
 $string['viewreport']            = 'View DocGuard report';
 $string['classreport']           = 'DocGuard class report';

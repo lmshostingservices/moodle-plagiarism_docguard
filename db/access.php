@@ -29,7 +29,35 @@ $capabilities = [
         'riskbitmask' => RISK_PERSONAL,
         'captype'     => 'read',
         'contextlevel' => CONTEXT_MODULE,
+        // FIX-DG-CAP-ARCHETYPES (v1.0.78): Added the 'teacher' (non-editing
+        // teacher) archetype. lib.php::plagiarism_docguard_get_links() renders the
+        // badge and the "View DocGuard Report" link to anyone holding
+        // mod/assign:grade — which Moodle core grants to non-editing teachers —
+        // but report.php and student_report.php required this capability, which
+        // non-editing teachers did not have. The result was a visible report link
+        // that always answered "Sorry, but you do not currently have permissions
+        // to do that". Markers, tutors and lecturers on non-editing roles are
+        // exactly the people who need the breakdown.
+        //
+        // IMPORTANT: archetypes are applied by update_capabilities() only when the
+        // capability row is FIRST created. On a site where this capability already
+        // exists, adding an archetype here changes nothing — Moodle re-syncs only
+        // captype, contextlevel and riskbitmask for existing capabilities. The
+        // upgrade step in db/upgrade.php therefore grants it explicitly to existing
+        // teacher-archetype roles, and lib.php's runtime check is what actually
+        // guarantees markers can open the report either way.
+        //
+        // 'clonepermissionsfrom' => 'mod/assign:grade' was considered and rejected:
+        // it silently overrides this archetypes block on new installs and copies
+        // every role_capabilities row for the source capability, including
+        // context-specific overrides, which would hand a RISK_PERSONAL capability to
+        // any custom or peer-marking role granted mod/assign:grade in one course.
+        //
+        // Roles created with Archetype = None (custom "Marker"/"Assessor" roles)
+        // receive nothing from archetype defaults and must still be granted this
+        // capability explicitly by an administrator.
         'archetypes'  => [
+            'teacher'        => CAP_ALLOW,
             'editingteacher' => CAP_ALLOW,
             'manager'        => CAP_ALLOW,
         ],

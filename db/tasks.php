@@ -37,7 +37,14 @@ $tasks = [
     [
         // ADD-DG-PROCESS-PENDING (v1.0.69): Re-analyses stuck pending records and
         // scans for submitted files with no DB record (e.g. submissions made before
-        // the plugin was installed). Runs every 15 minutes, capped at 15 files/run.
+        // the plugin was installed). Capped at 15 files per run.
+        //
+        // Corrected in v1.0.78: this said "runs every 15 minutes", but 'minute' => 'R'
+        // with 'hour' => '*' is once an hour at a randomised minute. The cadence
+        // matters — the Phase 1 grace windows and the backfill rate are both reasoned
+        // about in terms of it. The schedule itself is unchanged; only the comment was
+        // wrong. Administrators can raise the frequency in Site administration →
+        // Server → Scheduled tasks if a site needs faster recovery.
         'classname'  => 'plagiarism_docguard\\task\\process_pending',
         'blocking'   => 0,
         'minute'     => 'R',

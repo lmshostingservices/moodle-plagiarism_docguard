@@ -225,6 +225,133 @@ function plagiarism_docguard_is_cm_active(int $cmid): bool {
     return ($value === false) || !empty($value);
 }
 
+/**
+ * Whether the current user may view DocGuard reports in this context.
+ *
+ * FIX-DG-REPORT-ACCESS (v1.0.78): single source of truth for report visibility.
+ *
+ * Before this fix, plagiarism_docguard_get_links() rendered the badge and the
+ * "View DocGuard Report" link to anyone holding mod/assign:grade, while
+ * report.php and student_report.php required plagiarism/docguard:viewreport and
+ * nothing else. Since db/access.php granted that capability to editingteacher
+ * and manager only, every non-editing teacher and every custom marker role saw a
+ * link that always answered "Sorry, but you do not currently have permissions to
+ * do that". Both the link and the pages now ask this one function.
+ *
+ * Allowing mod/assign:grade is not a widening of access: a user who can grade the
+ * assignment can already open every submitted file the report describes.
+ *
+ * @param \context $context Module context of the activity.
+ * @return bool
+ */
+function plagiarism_docguard_can_view_reports(\context $context): bool {
+    global $USER;
+
+    // get_links() is called once per row of View All Submissions, so this must be
+    // cheap on repeat calls within a request.
+    static $cache = [];
+    $cachekey = $context->id . ':' . (int)$USER->id;
+    if (isset($cache[$cachekey])) {
+        return $cache[$cachekey];
+    }
+
+    // An explicit PROHIBIT on the DocGuard capability is honoured ahead of everything
+    // else. Institutions do restrict who may see AI-risk scores, since they feed
+    // misconduct referrals; without this check the grading fallback below would make
+    // the capability grant-only and its role override meaningless.
+    if (plagiarism_docguard_capability_prohibited('plagiarism/docguard:viewreport', $context)) {
+        return $cache[$cachekey] = false;
+    }
+
+    // Only test the DocGuard capability if it is actually installed. On a site whose
+    // plugin version never advanced (see FIX-DG-VERSION-FREEZE in version.php),
+    // update_capabilities() never ran, the capability is absent from {capabilities},
+    // and has_capability() would emit a debugging warning on every page that renders
+    // a badge.
+    $capinstalled = !function_exists('get_capability_info')
+        || (bool)get_capability_info('plagiarism/docguard:viewreport');
+
+    if ($capinstalled && has_capability('plagiarism/docguard:viewreport', $context)) {
+        return $cache[$cachekey] = true;
+    }
+
+    // Fallback: anyone who can grade this activity. Note this is a fallback, not the
+    // primary test — a role explicitly granted the DocGuard capability is served by
+    // the branch above, and a role explicitly prohibited never reaches here.
+    return $cache[$cachekey] = has_capability('mod/assign:grade', $context);
+}
+
+/**
+ * Whether any role the user holds in this context's path explicitly PROHIBITs a
+ * capability.
+ *
+ * has_capability() cannot distinguish "not set" from "denied", and DocGuard needs to:
+ * "not set" is the normal state for a non-editing teacher and must fall through to
+ * the grading check, whereas a deliberate administrative denial must win.
+ *
+ * Deliberately limited to CAP_PROHIBIT. CAP_PROHIBIT is the only permission Moodle
+ * treats as absolute; CAP_PREVENT is merely the lowest-priority negative and is
+ * routinely overridden by an ALLOW on another role or at a deeper context. Honouring
+ * CAP_PREVENT here would re-create the very fault this release fixes — for example,
+ * the standard delegation pattern of Prevent at system level plus Allow at course
+ * level would deny the marker at exactly the point Moodle itself would allow them.
+ * Site administrators are exempt, matching has_capability()'s own behaviour.
+ *
+ * This is a conservative approximation of Moodle's permission resolution, not a
+ * replacement for it: it can only ever deny, never grant.
+ *
+ * @param string   $capability
+ * @param \context $context
+ * @return bool
+ */
+function plagiarism_docguard_capability_prohibited(string $capability, \context $context): bool {
+    global $DB, $USER;
+
+    if (function_exists('get_capability_info') && !get_capability_info($capability)) {
+        return false; // Capability not installed — nothing can prohibit it.
+    }
+    if (empty($USER->id) || isguestuser()) {
+        return false;
+    }
+    if (is_siteadmin()) {
+        return false; // Admins bypass capability checks in core; do not diverge here.
+    }
+
+    try {
+        // get_user_roles() reads role_assignments only. get_user_roles_with_special()
+        // additionally includes the Authenticated user and front page roles, which is
+        // exactly where a site-wide denial is normally set.
+        $roles = function_exists('get_user_roles_with_special')
+            ? get_user_roles_with_special($context, $USER->id)
+            : get_user_roles($context, $USER->id, true);
+        if (empty($roles)) {
+            return false;
+        }
+        $roleids = array_values(array_unique(array_map(fn($r) => (int)$r->roleid, $roles)));
+        $ctxids  = $context->get_parent_context_ids(true);
+        if (empty($roleids) || empty($ctxids)) {
+            return false;
+        }
+
+        [$rolesql, $roleparams] = $DB->get_in_or_equal($roleids, SQL_PARAMS_NAMED, 'r');
+        [$ctxsql,  $ctxparams]  = $DB->get_in_or_equal($ctxids,  SQL_PARAMS_NAMED, 'c');
+        $params = array_merge($roleparams, $ctxparams, [
+            'cap'      => $capability,
+            'prohibit' => CAP_PROHIBIT,
+        ]);
+
+        return $DB->record_exists_select(
+            'role_capabilities',
+            "capability = :cap AND permission = :prohibit AND roleid $rolesql AND contextid $ctxsql",
+            $params
+        );
+    } catch (\Throwable $e) {
+        // Never let this check break page rendering — fail open to the normal
+        // capability logic above.
+        return false;
+    }
+}
+
 function plagiarism_docguard_check_unlock(): bool {
     global $CFG;
     static $rt = null;
@@ -474,11 +601,11 @@ function plagiarism_docguard_get_links($linkarray) {
     $userid  = !empty($linkarray['userid']) ? (int)$linkarray['userid'] : (int)$USER->id;
 
     // ── Guard 7: visibility — teachers see all badges; students see their own ──
-    // mod/assign:grade is always defined in Moodle and covers editing teachers,
-    // managers, and admins. plagiarism/docguard:viewreport is an additional
-    // optional capability checked for backward compatibility.
-    $is_teacher = has_capability('mod/assign:grade', $context)
-               || has_capability('plagiarism/docguard:viewreport', $context);
+    // FIX-DG-REPORT-ACCESS (v1.0.78): delegate to the shared helper so this test
+    // and the one enforced by report.php / student_report.php can never diverge
+    // again. Previously this was an inline mod/assign:grade check while the report
+    // pages required a capability non-editing teachers did not hold.
+    $is_teacher = plagiarism_docguard_can_view_reports($context);
     $is_own     = ((int)$USER->id === $userid);
 
     if (!$is_teacher && !$is_own) {
@@ -665,7 +792,9 @@ function plagiarism_docguard_render_badge(
         $links = '<a href="' . $report_url->out(false) . '" class="docguard-link">View DocGuard Report</a>'
                . '<a href="' . $class_url->out(false)  . '" class="docguard-link" style="margin-left:8px;">Class Report</a>';
     } elseif ($is_teacher && $status === 'error') {
-        $links = '<small style="color:#888;font-size:0.75rem;">' . s(substr($errmsg, 0, 120)) . '</small>';
+        // core_text::substr, not substr: a byte-wise cut can sever a multi-byte
+        // character in an error message (same class of bug as FIX-DG-MB-TRUNCATE).
+        $links = '<small style="color:#888;font-size:0.75rem;">' . s(\core_text::substr($errmsg, 0, 120)) . '</small>';
     } elseif ($is_teacher && $status === 'pending' && ($subid || $fileid)) {
         // FIX-DG-REANALYSE-ALWAYS (v1.0.72): Show Re-analyse for ALL pending submissions
         // where the teacher can see the badge — regardless of age.
@@ -691,6 +820,25 @@ function plagiarism_docguard_render_badge(
         $links = '<a href="' . $reanalyse_url->out(false) . '" class="docguard-link"'
                . ' onclick="return confirm(\'Run DocGuard analysis now for this submission?\');">'
                . '&#8635; Re-analyse now</a>';
+    }
+
+    // FIX-DG-CLASS-REPORT-ROUTE (v1.0.78): give teachers a route to the class report
+    // from the NON-analysed badge states too.
+    //
+    // The plugin registers no navigation callback, so the badge link is the only way
+    // to reach report.php — and it was emitted only for analysed submissions. A
+    // teacher whose whole class was stuck on "Pending" therefore had no route to the
+    // class report at all, and so no route to its "Scan & Analyse Unprocessed
+    // Submissions" button, which is the one tool that recovers exactly that
+    // situation. From the teacher's side that is indistinguishable from a
+    // permissions fault, which is how this ticket was reported.
+    //
+    // Scoped to pending/error only: analysed rows already carry this link above, so
+    // this adds no duplicate links to a fully-analysed class list.
+    if ($is_teacher && $status !== 'analysed') {
+        $class_url = new \moodle_url('/plagiarism/docguard/report.php', ['cmid' => $cmid]);
+        $links .= '<a href="' . $class_url->out(false) . '" class="docguard-link"'
+               . ($links !== '' ? ' style="margin-left:8px;"' : '') . '>Class Report</a>';
     }
 
     return '<div class="docguard-wrap">' . $badge . $links . '</div>';

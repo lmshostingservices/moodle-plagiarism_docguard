@@ -37,7 +37,12 @@ $cm   = get_coursemodule_from_id('', $cmid, 0, false, MUST_EXIST);
 
 require_login($cm->course, false, $cm);
 $context = context_module::instance($cmid);
-require_capability('plagiarism/docguard:viewreport', $context);
+// FIX-DG-REPORT-ACCESS (v1.0.78): Accept mod/assign:grade OR
+// plagiarism/docguard:viewreport — see lib.php for the rationale. This is the page
+// holding the per-signal breakdown, which is what markers were unable to open.
+if (!plagiarism_docguard_can_view_reports($context)) {
+    require_capability('plagiarism/docguard:viewreport', $context);
+}
 
 // ── Re-analyse POST handler ───────────────────────────────────────────────────
 // Allows a teacher to force re-extraction + re-analysis of a submission that
@@ -176,7 +181,15 @@ echo '</div>';
 $sections = $DB->get_records('plagiarism_docguard_sec', ['subid' => $subid], 'section_num ASC');
 
 if (empty($sections)) {
-    echo $OUTPUT->notification('No section data available.', 'info');
+    // FIX-DG-EMPTY-BREAKDOWN-MSG (v1.0.78): "No section data available." gave the
+    // teacher no idea whether this was a bug, a permissions problem or an empty
+    // document. Explain it and point at the recovery action on this same page.
+    echo $OUTPUT->notification(
+        'No per-section breakdown is stored for this submission. The overall score above was '
+        . 'calculated, but the section detail was either never stored or has since been removed. '
+        . 'Use the Re-analyse button at the top of this page to rebuild it.',
+        'info'
+    );
 } else {
     echo '<h4 style="margin:0 0 1rem;">Per-Section Analysis</h4>';
 
@@ -323,7 +336,14 @@ if (empty($sections)) {
             }
             echo '</tbody></table>';
         } else {
-            echo '<p style="color:#9ca3af;font-style:italic;font-size:0.85rem;">No signal data available.</p>';
+            // FIX-DG-EMPTY-BREAKDOWN-MSG (v1.0.78): analyser::score_section() returns
+            // an empty signal set for any section under 8 recognised words, and
+            // records the reason as a section-level 'insufficient_text' note that was
+            // never rendered anywhere. State the reason instead of showing a blank card.
+            echo '<p style="color:#9ca3af;font-style:italic;font-size:0.85rem;">'
+                . 'No signals were evaluated for this section — fewer than 8 words were recognised in it. '
+                . 'This is expected for headings and very short answers, and can also mean the text '
+                . 'did not extract cleanly from the original file.</p>';
         }
 
         echo '</div></div>';
