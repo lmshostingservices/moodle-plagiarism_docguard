@@ -34,10 +34,14 @@ defined('MOODLE_INTERNAL') || die();
 //
 // Any future release that touches db/access.php or db/install.xml MUST raise this
 // number, and it must always be greater than or equal to the highest savepoint in
-// db/upgrade.php (currently 2026081500).
+// db/upgrade.php (currently 2026081501).
+//
+// Raising it is also necessary but NOT sufficient on its own: a bump with no
+// matching savepoint above the site's recorded version produces an upgrade that
+// runs no steps. Add a savepoint block in db/upgrade.php for every bump.
 $plugin->component = 'plagiarism_docguard';
-$plugin->version   = 2026081500;
-$plugin->release   = '1.0.78';
+$plugin->version   = 2026081501;
+$plugin->release   = '1.0.79';
 $plugin->requires  = 2022041900;
 $plugin->maturity  = MATURITY_STABLE;
 $plugin->supported = [400, 501];

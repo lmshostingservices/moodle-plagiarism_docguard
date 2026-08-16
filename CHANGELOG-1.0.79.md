@@ -1,8 +1,10 @@
-# DocGuard 1.0.78 — teachers unable to see the plagiarism breakdown
+# DocGuard 1.0.79 — teachers unable to see the plagiarism breakdown
 
 Built from 1.0.77 (`2026072300`, build `a7731b19c5260a41`). No database schema changes.
 
-**Version: `2026081500` — this MUST be higher than the installed version or Moodle will not run the upgrade.** See fix 2.
+**Version: `2026081501` — this MUST be higher than the installed version or Moodle will not run the upgrade.** See fix 2.
+
+> **1.0.79 supersedes 1.0.78.** Same fixes, re-stamped. A site could register `2026081500` without actually running the upgrade steps — files replaced while an opcode cache still served the old `version.php`, or a deploy recording the version before the steps completed. Moodle then shows no upgrade prompt, because on-disk and recorded versions match, and the capability grant never happens. 1.0.79 raises the integer **and** adds a matching savepoint, so there is real work above the recorded version. A version bump on its own would produce an upgrade that runs no steps.
 
 ---
 
@@ -31,7 +33,7 @@ Allowing `mod/assign:grade` is not a widening of access: anyone who can grade th
 
 `version.php` was pinned at `2026072300` while `db/upgrade.php` carried **three** separate `if ($oldversion < 2026072300)` blocks: releases 1.0.74–1.0.77 all shipped the same version integer. Moodle runs a plugin's upgrade — and re-syncs `db/access.php` — only when that integer increases, so replacing the plugin files changed nothing. Upgrades appeared to succeed and did nothing.
 
-- `version.php` — bumped to `2026081500`, release `1.0.78`.
+- `version.php` — bumped to `2026081501`, release `1.0.79`.
 - `db/upgrade.php` — a matching upgrade block that **explicitly grants** `plagiarism/docguard:viewreport` to existing non-editing teacher roles. This is necessary because archetypes are applied only when a capability row is first created; adding an archetype does nothing on a site where the capability already exists. Uses `$overwrite = false`, so any explicit permission an administrator has already set is left alone.
 - `clonepermissionsfrom` was considered and rejected — it silently overrides the archetypes block and copies every context-specific grant of the source capability.
 
@@ -73,12 +75,20 @@ This is **pre-existing in 1.0.77**, not introduced here, but this release grants
 
 ---
 
+## Packaging
+
+Passes the LMS-Labs Plugin Release Pipeline v1.2.0 with no blockers or errors.
+
+- The ZIP root folder is **`docguard`**, not `plagiarism_docguard` — Moodle expects the component name with the type prefix removed, and all 45 internal path references use `/plagiarism/docguard/`. The 1.0.77 package had this wrong; anyone who installed it by unzipping directly would have placed it in the wrong directory.
+- `BUILD_INFO.json` is excluded from the package. No code reads it.
+- `version.php` contains exactly one parseable `$plugin->version` assignment. Do not write example version numbers in `$plugin->version = NNNN` form inside comments — release tooling reads the first match and will report the commented value.
+
 ## Installing
 
 1. Confirm the current version at *Site administration → Plugins → Plugins overview*. Note it.
 2. Back up, or install on staging first.
 3. Replace `/plagiarism/docguard/` with the contents of this zip.
-4. Visit *Site administration → Notifications* and complete the upgrade. **The version must move to `2026081500`.** If it does not, the upgrade did not run and nothing has changed.
+4. Visit *Site administration → Notifications* and complete the upgrade. **The version must move to `2026081501` and the release to `1.0.79`.** If it does not, the upgrade did not run and nothing has changed.
 5. Purge all caches.
 6. Check *Define roles → Non-editing teacher* — `plagiarism/docguard:viewreport` should now be **Allow**.
 7. Ask the lecturer to re-open a report.

@@ -385,5 +385,72 @@ function xmldb_plagiarism_docguard_upgrade($oldversion) {
         upgrade_plugin_savepoint(true, 2026081500, 'plagiarism', 'docguard');
     }
 
+    if ($oldversion < 2026081501) {
+        // ── v1.0.79 — re-trigger for sites that registered 2026081500 ────────
+        //
+        // A site can end up holding version 2026081500 in {config_plugins} without
+        // having run the block above — for example if the files were replaced while
+        // an opcode cache still served the previous version.php, or if a deploy
+        // registered the version before the upgrade steps completed. Moodle then
+        // shows no upgrade prompt at all, because on-disk and recorded versions
+        // match, and the capability grant never happens.
+        //
+        // Raising the version integer alone would not fix that: it produces an
+        // upgrade with no steps to run, since every block above is guarded on a
+        // lower $oldversion. This savepoint exists so there is actual work above the
+        // recorded version.
+        //
+        // The grant is idempotent and uses $overwrite = false, so re-running it on a
+        // site that already applied it changes nothing.
+        if (function_exists('get_capability_info') && get_capability_info('plagiarism/docguard:viewreport')
+                && function_exists('get_archetype_roles')) {
+            try {
+                $systemcontext = context_system::instance();
+                $granted       = 0;
+                foreach (get_archetype_roles('teacher') as $role) {
+                    $already = $DB->record_exists('role_capabilities', [
+                        'roleid'     => $role->id,
+                        'contextid'  => $systemcontext->id,
+                        'capability' => 'plagiarism/docguard:viewreport',
+                    ]);
+                    assign_capability('plagiarism/docguard:viewreport', CAP_ALLOW,
+                        $role->id, $systemcontext->id, false);
+                    if (!$already) {
+                        $granted++;
+                    }
+                }
+                upgrade_log(UPGRADE_LOG_NORMAL, 'plagiarism_docguard',
+                    "Re-check: granted plagiarism/docguard:viewreport to {$granted} non-editing teacher role(s).");
+            } catch (\Throwable $e) {
+                upgrade_log(UPGRADE_LOG_NOTICE, 'plagiarism_docguard',
+                    'Could not grant plagiarism/docguard:viewreport to teacher roles: ' . $e->getMessage());
+            }
+        }
+
+        if (function_exists('opcache_invalidate')) {
+            $plugindir = realpath(__DIR__ . '/..');
+            foreach ([
+                'version.php',
+                'lib.php',
+                'report.php',
+                'student_report.php',
+                'reanalyse.php',
+                'db/access.php',
+                'db/upgrade.php',
+                'classes/observer.php',
+                'classes/extractor.php',
+                'classes/privacy/provider.php',
+                'classes/task/process_pending.php',
+            ] as $file) {
+                $full = $plugindir . '/' . $file;
+                if (file_exists($full)) {
+                    opcache_invalidate($full, true);
+                }
+            }
+        }
+
+        upgrade_plugin_savepoint(true, 2026081501, 'plagiarism', 'docguard');
+    }
+
     return true;
 }
