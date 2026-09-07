@@ -11,7 +11,7 @@
 # DocGuard — Document Plagiarism and AI-Use Checker
 
 **Version:** see `version.php` and the top of [CHANGELOG.md](CHANGELOG.md) - deliberately not repeated here, so it cannot go stale
-**Moodle Compatibility:** Moodle 4.5 LTS - 5.2 (`$plugin->requires = 2024100700`, `$plugin->supported = [405, 502]`)
+**Moodle Compatibility:** Moodle 4.4 - 5.2 (`$plugin->requires = 2024042200`, `$plugin->supported = [404, 502]`)
 **Plugin Type:** Plagiarism plugin (`plagiarism_docguard`)
 **Licence:** GNU GPL v3 or later
 
@@ -39,7 +39,7 @@ of misconduct, and every report says so.
 
 ## Requirements
 
-- Moodle 4.5 LTS or later (declared support runs to 5.2).
+- Moodle 4.4 or later (declared support runs to 5.2).
 - Moodle's core plagiarism subsystem switched on:
   *Site administration → Advanced features → Enable plagiarism plugins*.
   DocGuard does **not** change this site-wide setting for you, because it also affects
