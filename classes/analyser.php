@@ -16,8 +16,6 @@
 
 namespace plagiarism_docguard;
 
-defined('MOODLE_INTERNAL') || die();
-
 /**
  * DocGuard analysis engine.
  *
@@ -38,11 +36,19 @@ defined('MOODLE_INTERNAL') || die();
  * Risk banding:  LOW 0–34 | MEDIUM 35–64 | HIGH 65–100
  * @package    plagiarism_docguard
  * @copyright  2026 LMS-Labs
- * @license    http://www.gnu.org/licenses/gpl-3.0.html GNU GPL v3 or later
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class analyser {
-    // ── AI Marker Vocabulary ───────────────────────────────────────────────────
+    /* ── AI Marker Vocabulary ─────────────────────────────────────────────────── */
 
+    /**
+     * Words and phrases that occur far more often in generated prose than in student writing.
+     *
+     * signal_ai_markers() (S1) counts occurrences of each entry, so the list must stay free
+     * of duplicates — a repeated entry is counted twice for a single occurrence in the text.
+     *
+     * @var string[]
+     */
     const AI_MARKERS = [
         'delve', 'delving', 'delved',
         'it is important to note', "it's important to note",
@@ -80,20 +86,46 @@ class analyser {
         'harness', 'harnessing', 'harnessed',
         'unlock', 'unlocking', 'unlocks',
         'resonate', 'resonates', 'resonating',
-        'journey', 'landscape', 'tapestry',
+        // V1.0.84 FIX-DG-MARKER-DUPLICATE: 'landscape' was listed twice (also at the
+        // 'synergy/ecosystem' line above). signal_ai_markers() walks this list with
+        // strpos(), so ONE occurrence of the word in a student's text was counted as two
+        // distinct markers and shown to the teacher twice - and that single duplicate
+        // was enough to move the signal from the one-marker band (3 points) to the
+        // two-marker band (8). Deduplicated here rather than in the loop so the list
+        // stays the single source of truth.
+        'journey', 'tapestry',
         'firstly', 'secondly', 'thirdly', 'fourthly', 'lastly',
         'overall', 'in essence', 'in brief',
     ];
 
+    /**
+     * Formal connectors whose density signal_transitions() (S4) measures per 100 words.
+     *
+     * Counted with substr_count() per entry, so duplicates inflate the rate — see the
+     * FIX-DG-TRANSITION-DUPLICATE note below.
+     *
+     * @var string[]
+     */
     const TRANSITION_WORDS = [
         'furthermore', 'moreover', 'additionally', 'however', 'therefore',
         'thus', 'hence', 'consequently', 'accordingly', 'subsequently',
         'in addition', 'as a result', 'in contrast', 'on the other hand',
         'nevertheless', 'nonetheless', 'notwithstanding', 'alternatively',
-        'conversely', 'meanwhile', 'meanwhile', 'similarly', 'likewise',
+        // V1.0.84 FIX-DG-TRANSITION-DUPLICATE: 'meanwhile' was listed twice.
+        // signal_transitions() sums substr_count() per entry, so one "Meanwhile" in a
+        // student's text counted as two connectors and appeared twice in the hits shown
+        // to the teacher. In a 51-word section that doubled the rate from 1.96 to 3.92
+        // per 100 words, crossing the 3.0 threshold and awarding 5 points that a single
+        // connector should not earn.
+        'conversely', 'meanwhile', 'similarly', 'likewise',
         'in particular', 'specifically', 'notably', 'evidently', 'clearly',
     ];
 
+    /**
+     * Everyday contractions whose absence signal_contractions() (S5) treats as a signal.
+     *
+     * @var string[]
+     */
     const CONTRACTIONS = [
         "don't", "doesn't", "didn't", "can't", "won't", "wouldn't", "couldn't",
         "shouldn't", "isn't", "aren't", "wasn't", "weren't", "haven't", "hasn't",
@@ -102,18 +134,28 @@ class analyser {
         "we've", "we'll", "let's", "what's", "who's", "how's",
     ];
 
+    /**
+     * Sentence openers signal_uniform_starts() (S9) counts when judging opener variety.
+     *
+     * @var string[]
+     */
     const UNIFORM_STARTS = ['the ', 'it ', 'this ', 'in ', 'for ', 'there ', 'these '];
 
-    // ── Public API ─────────────────────────────────────────────────────────────
+    /* ── Public API ───────────────────────────────────────────────────────────── */
 
     /**
      * Analyse a full submission: extract text, parse sections, score each.
      *
-     * @param \stored_file $file
-     * @param int          $cmid
-     * @param int          $userid
-     * @param int          $submissionid
-     * @return array  ['status', 'overall_riskscore', 'overall_risklevel', 'sections', 'analysisjson', 'normtext', 'error']
+     * @param \stored_file $file The submitted PDF or DOCX to analyse.
+     * @param int $cmid Course module id of the activity the file was submitted to.
+     * @param int $userid Id of the student who submitted the file.
+     * @param int $submissionid Id of the {plagiarism_docguard_sub} row this analysis
+     *                              belongs to, used to exclude the submission from its own
+     *                              cross-submission comparison.
+     * @return array Result record with keys status ('ok' or 'error'), overall_riskscore,
+     *               overall_risklevel, sections (per-section scoring), analysisjson (the
+     *               serialised detail stored on the submission row), normtext (the
+     *               normalised extracted text) and error (message when status is 'error').
      */
     public static function analyse_file(\stored_file $file, int $cmid, int $userid, int $submissionid): array {
         // Extract text.
@@ -148,6 +190,34 @@ class analyser {
             ];
         }
 
+        // V1.0.80: refuse to score a document whose script the signals cannot read,
+        // instead of returning a meaningless 0/100 LOW. See latin_letter_ratio(). The
+        // threshold is deliberately low (half the letters) so that a normal English
+        // submission quoting a passage of Greek, Arabic or Chinese is still analysed;
+        // only a document that is substantially not in Latin script is declined. The
+        // normalised text is still stored, so cross-student similarity — which is
+        // script-independent since v1.0.80 — keeps working for these documents.
+        $latinratio = self::latin_letter_ratio($text);
+        if ($latinratio < 0.5) {
+            return [
+                'status'             => 'error',
+                'overall_riskscore'  => 0,
+                'overall_risklevel'  => 'low',
+                'sections'           => [],
+                'analysisjson'       => json_encode([
+                    'unsupported_script' => true,
+                    'latin_letter_ratio' => round($latinratio, 3),
+                ]),
+                'normtext'           => \core_text::substr(
+                    question_parser::normalise_for_similarity($text),
+                    0,
+                    65000
+                ),
+                // Under 120 characters: lib.php truncates badge error text there.
+                'error'              => 'Unsupported script: DocGuard\'s signals are English-only and cannot score this document.',
+            ];
+        }
+
         // Parse into sections.
         $sections = question_parser::parse($text);
 
@@ -164,17 +234,17 @@ class analyser {
         }
 
         // Score each section individually.
-        $scored_sections = [];
+        $scoredsections = [];
         foreach ($sections as $sec) {
             $result = self::score_section($sec['text']);
-            $scored_sections[] = array_merge($sec, $result);
+            $scoredsections[] = array_merge($sec, $result);
         }
 
         // S11: Cross-section style inconsistency.
-        if (count($scored_sections) >= 2) {
-            $s11 = self::signal_cross_section_inconsistency($scored_sections);
+        if (count($scoredsections) >= 2) {
+            $s11 = self::signal_cross_section_inconsistency($scoredsections);
             // Distribute S11 points equally across sections.
-            foreach ($scored_sections as &$sec) {
+            foreach ($scoredsections as &$sec) {
                 $sec['signals']['s11_cross_section'] = $s11;
                 $sec['riskscore'] = min(100, $sec['riskscore'] + $s11['points']);
                 $sec['risklevel'] = self::band($sec['riskscore']);
@@ -183,39 +253,47 @@ class analyser {
         }
 
         // Overall score = weighted average (longer sections weigh more).
-        $total_weight = 0;
-        $total_score  = 0;
-        foreach ($scored_sections as $sec) {
+        $totalweight = 0;
+        $totalscore  = 0;
+        foreach ($scoredsections as $sec) {
             $w = max(1, $sec['wordcount']);
-            $total_score  += $sec['riskscore'] * $w;
-            $total_weight += $w;
+            $totalscore  += $sec['riskscore'] * $w;
+            $totalweight += $w;
         }
-        $overall_score = $total_weight > 0 ? round($total_score / $total_weight, 2) : 0;
-        $overall_level = self::band($overall_score);
+        $overallscore = $totalweight > 0 ? round($totalscore / $totalweight, 2) : 0;
+        $overalllevel = self::band($overallscore);
 
         // Normalised text for cross-student similarity.
         $norm = question_parser::normalise_for_similarity($text);
 
         $analysis = [
-            'section_count'    => count($scored_sections),
-            'overall_score'    => $overall_score,
-            'overall_level'    => $overall_level,
+            'section_count'    => count($scoredsections),
+            'overall_score'    => $overallscore,
+            'overall_level'    => $overalllevel,
             'extraction_chars' => strlen($text),
         ];
 
         return [
             'status'            => 'analysed',
-            'overall_riskscore' => $overall_score,
-            'overall_risklevel' => $overall_level,
-            'sections'          => $scored_sections,
+            'overall_riskscore' => $overallscore,
+            'overall_risklevel' => $overalllevel,
+            'sections'          => $scoredsections,
             'analysisjson'      => json_encode($analysis),
-            'normtext'          => substr($norm, 0, 65000),
+            // V1.0.80: core_text::substr, not substr — a byte-wise cut on now-Unicode
+            // normalised text can sever a multi-byte character, and MySQL/utf8mb4 rejects
+            // the result with "Incorrect string value" (the same class of bug as
+            // FIX-DG-MB-TRUNCATE in observer.php).
+            'normtext'          => \core_text::substr($norm, 0, 65000),
             'error'             => null,
         ];
     }
 
     /**
      * Score a single text section across signals S1–S10.
+     *
+     * @param string $text The section text to score.
+     * @return array riskscore (0-100), risklevel, wordcount, signals (keyed S1-S11), and
+     *               for sections under 8 words a "note" of "insufficient_text".
      */
     public static function score_section(string $text): array {
         $lower  = strtolower($text);
@@ -233,71 +311,81 @@ class analyser {
         }
 
         $signals     = [];
-        $total_score = 0;
+        $totalscore = 0;
 
-        // S1 — AI marker vocabulary (0–22 pts)
+        // S1 — AI marker vocabulary (0–22 pts).
         $s1 = self::signal_ai_markers($lower, $wcount);
         $signals['s1_ai_markers'] = $s1;
-        $total_score += $s1['points'];
+        $totalscore += $s1['points'];
 
-        // S2 — Sentence length uniformity (0–10 pts)
+        // S2 — Sentence length uniformity (0–10 pts).
         $s2 = self::signal_sentence_uniformity($text);
         $signals['s2_sentence_uniformity'] = $s2;
-        $total_score += $s2['points'];
+        $totalscore += $s2['points'];
 
-        // S3 — TTR uniformity across paragraphs (0–8 pts)
+        // S3 — TTR uniformity across paragraphs (0–8 pts).
         $s3 = self::signal_ttr_uniformity($text);
         $signals['s3_ttr_uniformity'] = $s3;
-        $total_score += $s3['points'];
+        $totalscore += $s3['points'];
 
-        // S4 — Formal transition overuse (0–8 pts)
+        // S4 — Formal transition overuse (0–8 pts).
         $s4 = self::signal_transitions($lower, $wcount);
         $signals['s4_transitions'] = $s4;
-        $total_score += $s4['points'];
+        $totalscore += $s4['points'];
 
-        // S5 — Contraction absence (0–6 pts)
+        // S5 — Contraction absence (0–6 pts).
         $s5 = self::signal_contraction_absence($lower, $wcount);
         $signals['s5_contractions'] = $s5;
-        $total_score += $s5['points'];
+        $totalscore += $s5['points'];
 
-        // S6 — Passive voice ratio (0–6 pts)
+        // S6 — Passive voice ratio (0–6 pts).
         $s6 = self::signal_passive_voice($lower, $wcount);
         $signals['s6_passive_voice'] = $s6;
-        $total_score += $s6['points'];
+        $totalscore += $s6['points'];
 
-        // S7 — Intro/conclusion template pattern (0–10 pts)
+        // S7 — Intro/conclusion template pattern (0–10 pts).
         $s7 = self::signal_template_pattern($lower);
         $signals['s7_template'] = $s7;
-        $total_score += $s7['points'];
+        $totalscore += $s7['points'];
 
-        // S8 — Trigram repetition (0–8 pts)
+        // S8 — Trigram repetition (0–8 pts).
         $s8 = self::signal_trigram_repetition($words);
         $signals['s8_trigrams'] = $s8;
-        $total_score += $s8['points'];
+        $totalscore += $s8['points'];
 
-        // S9 — Uniform sentence starts (0–6 pts)
+        // S9 — Uniform sentence starts (0–6 pts).
         $s9 = self::signal_sentence_starts($text);
         $signals['s9_sentence_starts'] = $s9;
-        $total_score += $s9['points'];
+        $totalscore += $s9['points'];
 
-        // S10 — Vocabulary richness extremity (0–6 pts)
+        // S10 — Vocabulary richness extremity (0–6 pts).
         $s10 = self::signal_vocab_richness($words, $wcount);
         $signals['s10_vocab_richness'] = $s10;
-        $total_score += $s10['points'];
+        $totalscore += $s10['points'];
 
-        $total_score = (int)min(100, $total_score);
-        $level       = self::band($total_score);
+        $totalscore = (int)min(100, $totalscore);
+        $level       = self::band($totalscore);
 
         return [
-            'riskscore' => $total_score,
+            'riskscore' => $totalscore,
             'risklevel' => $level,
             'wordcount' => $wcount,
             'signals'   => $signals,
         ];
     }
 
-    // ── Signal Implementations ────────────────────────────────────────────────
+    /* ── Signal Implementations ──────────────────────────────────────────────── */
 
+    /**
+     * S1 — count phrases from the AI marker vocabulary present in the section.
+     *
+     * Scores 0-22 points on how many distinct markers appear, and reports the ten
+     * matches found so the teacher can see what triggered it.
+     *
+     * @param string $lower The section text, already lower-cased.
+     * @param int $wcount Number of recognised words in the section, used for density.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_ai_markers(string $lower, int $wcount): array {
         $hits   = [];
         $count  = 0;
@@ -309,11 +397,17 @@ class analyser {
         }
         $density = $wcount > 0 ? ($count / $wcount * 100) : 0;
         $points  = 0;
-        if ($count >= 7)      { $points = 22; }
-        elseif ($count >= 5)  { $points = 17; }
-        elseif ($count >= 3)  { $points = 12; }
-        elseif ($count >= 2)  { $points = 8; }
-        elseif ($count === 1) { $points = 3; }
+        if ($count >= 7) {
+            $points = 22;
+        } else if ($count >= 5) {
+            $points = 17;
+        } else if ($count >= 3) {
+            $points = 12;
+        } else if ($count >= 2) {
+            $points = 8;
+        } else if ($count === 1) {
+            $points = 3;
+        }
 
         return [
             'points'         => $points,
@@ -327,6 +421,15 @@ class analyser {
         ];
     }
 
+    /**
+     * S2 — measure how uniform the sentence lengths are across the section.
+     *
+     * A low standard deviation of sentence word-counts is characteristic of generated
+     * text; human writing varies sentence length far more.
+     *
+     * @param string $text The section text.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_sentence_uniformity(string $text): array {
         $sentences = self::split_sentences($text);
         $lengths   = array_map(fn($s) => count(self::words(strtolower($s))), $sentences);
@@ -342,25 +445,40 @@ class analyser {
 
         $mean    = array_sum($lengths) / $n;
         $variance = array_sum(array_map(fn($l) => ($l - $mean) ** 2, $lengths)) / $n;
-        $std_dev = sqrt($variance);
+        $stddev = sqrt($variance);
 
         $points = 0;
-        if ($std_dev < 2.0 && $mean > 8)      { $points = 10; }
-        elseif ($std_dev < 3.0 && $mean > 8)  { $points = 6; }
-        elseif ($std_dev < 4.0 && $mean > 8)  { $points = 3; }
+        if ($stddev < 2.0 && $mean > 8) {
+            $points = 10;
+        } else if ($stddev < 3.0 && $mean > 8) {
+            $points = 6;
+        } else if ($stddev < 4.0 && $mean > 8) {
+            $points = 3;
+        }
 
         return [
             'points'         => $points,
             'max'            => 10,
             'sentence_count' => $n,
             'mean_words'     => round($mean, 1),
-            'std_dev'        => round($std_dev, 2),
+            'std_dev'        => round($stddev, 2),
             'label'          => 'Sentence length uniformity',
-            'description'    => 'AI tends to write sentences of near-identical length. Low standard deviation across sentence word-counts is suspicious.',
+            'description'    => 'AI tends to write sentences of near-identical length. Low standard deviation across '
+                . 'sentence word-counts is suspicious.',
             'fired'          => $points > 0,
         ];
     }
 
+    /**
+     * S3 — measure how consistent vocabulary richness is between paragraphs.
+     *
+     * Computes the type-token ratio of each paragraph of 20 or more words and scores
+     * the standard deviation across them. Returns zero points for fewer than two
+     * qualifying paragraphs.
+     *
+     * @param string $text The section text.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_ttr_uniformity(string $text): array {
         $paras = array_filter(
             preg_split('/\n{2,}/', $text),
@@ -382,24 +500,37 @@ class analyser {
         }
         $mean    = array_sum($ttrs) / count($ttrs);
         $variance = array_sum(array_map(fn($t) => ($t - $mean) ** 2, $ttrs)) / count($ttrs);
-        $std_dev  = sqrt($variance);
+        $stddev  = sqrt($variance);
 
         $points = 0;
-        if ($std_dev < 0.025)     { $points = 8; }
-        elseif ($std_dev < 0.05)  { $points = 4; }
+        if ($stddev < 0.025) {
+            $points = 8;
+        } else if ($stddev < 0.05) {
+            $points = 4;
+        }
 
         return [
             'points'      => $points,
             'max'         => 8,
             'para_count'  => $n,
             'ttr_values'  => array_map(fn($t) => round($t, 3), $ttrs),
-            'ttr_std_dev' => round($std_dev, 4),
+            'ttr_std_dev' => round($stddev, 4),
             'label'       => 'Type-Token Ratio uniformity across paragraphs',
-            'description' => 'Humans vary their vocabulary richness between paragraphs. AI maintains a suspiciously consistent TTR.',
+            'description' => 'Humans vary their vocabulary richness between paragraphs. AI maintains a suspiciously '
+                . 'consistent TTR.',
             'fired'       => $points > 0,
         ];
     }
 
+    /**
+     * S4 — detect over-use of formal academic connectors.
+     *
+     * Counts occurrences of the transition word list and scores the rate per 100 words.
+     *
+     * @param string $lower The section text, already lower-cased.
+     * @param int $wcount Number of recognised words in the section.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_transitions(string $lower, int $wcount): array {
         $count = 0;
         $hits  = [];
@@ -412,9 +543,13 @@ class analyser {
         }
         $per100 = $wcount > 0 ? round($count / $wcount * 100, 2) : 0;
         $points = 0;
-        if ($per100 >= 4)     { $points = 8; }
-        elseif ($per100 >= 3) { $points = 5; }
-        elseif ($per100 >= 2) { $points = 2; }
+        if ($per100 >= 4) {
+            $points = 8;
+        } else if ($per100 >= 3) {
+            $points = 5;
+        } else if ($per100 >= 2) {
+            $points = 2;
+        }
 
         return [
             'points'      => $points,
@@ -428,6 +563,16 @@ class analyser {
         ];
     }
 
+    /**
+     * S5 — detect the complete absence of contractions in a long section.
+     *
+     * Only evaluated for sections of 100 words or more; shorter text cannot support
+     * the inference.
+     *
+     * @param string $lower The section text, already lower-cased.
+     * @param int $wcount Number of recognised words in the section.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_contraction_absence(string $lower, int $wcount): array {
         if ($wcount < 100) {
             return ['points' => 0, 'max' => 6, 'found' => [], 'label' => 'Contraction absence', 'fired' => false,
@@ -440,34 +585,49 @@ class analyser {
             }
         }
         $points = 0;
-        if (empty($found) && $wcount >= 300)      { $points = 6; }
-        elseif (empty($found) && $wcount >= 150)  { $points = 3; }
+        if (empty($found) && $wcount >= 300) {
+            $points = 6;
+        } else if (empty($found) && $wcount >= 150) {
+            $points = 3;
+        }
 
         return [
             'points'      => $points,
             'max'         => 6,
             'found'       => $found,
             'label'       => 'Absence of contractions',
-            'description' => 'Students naturally use contractions in informal writing. Formal AI-generated text often avoids them entirely.',
+            'description' => 'Students naturally use contractions in informal writing. Formal AI-generated text often '
+                . 'avoids them entirely.',
             'fired'       => $points > 0,
         ];
     }
 
+    /**
+     * S6 — measure the proportion of passive-voice constructions.
+     *
+     * @param string $lower The section text, already lower-cased.
+     * @param int $wcount Number of recognised words in the section.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_passive_voice(string $lower, int $wcount): array {
-        // Simple heuristic: "was/were/is/are/been/be [word]ed" or "was/were [word]en"
+        // Simple heuristic: "was/were/is/are/been/be [word]ed" or "was/were [word]en".
         $passive = preg_match_all(
             '/\b(was|were|is|are|been|be|being)\s+\w+(ed|en)\b/',
-            $lower, $m
+            $lower,
+            $m
         );
         $ratio = $wcount > 0 ? round($passive / $wcount, 4) : 0;
         $points = 0;
-        if ($ratio >= 0.04)     { $points = 6; }
-        elseif ($ratio >= 0.025){ $points = 3; }
+        if ($ratio >= 0.04) {
+            $points = 6;
+        } else if ($ratio >= 0.025) {
+            $points = 3;
+        }
 
         return [
             'points'       => $points,
             'max'          => 6,
-            'passive_count'=> $passive,
+            'passive_count' => $passive,
             'ratio'        => $ratio,
             'label'        => 'Passive voice overuse',
             'description'  => 'AI-generated academic text tends to use significantly more passive voice than human writers.',
@@ -475,6 +635,15 @@ class analyser {
         ];
     }
 
+    /**
+     * S7 — detect templated essay openers and closers.
+     *
+     * Looks for stock opening phrases in the first 300 characters and stock closing
+     * phrases in the last 300 characters of the section.
+     *
+     * @param string $lower The section text, already lower-cased.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_template_pattern(string $lower): array {
         $openers = [
             'this essay will', 'this paper will', 'this report will', 'this assignment will',
@@ -492,37 +661,56 @@ class analyser {
         $intro = substr($lower, 0, 300);
         $outro = substr($lower, -300);
 
-        $found_opener = false;
-        $found_closer = false;
-        $opener_hit   = '';
-        $closer_hit   = '';
+        $foundopener = false;
+        $foundcloser = false;
+        $openerhit   = '';
+        $closerhit   = '';
 
         foreach ($openers as $o) {
-            if (strpos($intro, $o) !== false) { $found_opener = true; $opener_hit = $o; break; }
+            if (strpos($intro, $o) !== false) {
+                $foundopener = true;
+                $openerhit = $o;
+                break;
+            }
         }
         foreach ($closers as $c) {
             if (strpos($outro, $c) !== false || strpos($lower, $c) !== false) {
-                $found_closer = true; $closer_hit = $c; break;
+                $foundcloser = true;
+                $closerhit = $c;
+                break;
             }
         }
 
         $points = 0;
-        if ($found_opener && $found_closer) { $points = 10; }
-        elseif ($found_opener || $found_closer) { $points = 5; }
+        if ($foundopener && $foundcloser) {
+            $points = 10;
+        } else if ($foundopener || $foundcloser) {
+            $points = 5;
+        }
 
         return [
             'points'       => $points,
             'max'          => 10,
-            'opener_found' => $found_opener,
-            'closer_found' => $found_closer,
-            'opener_hit'   => $opener_hit,
-            'closer_hit'   => $closer_hit,
+            'opener_found' => $foundopener,
+            'closer_found' => $foundcloser,
+            'opener_hit'   => $openerhit,
+            'closer_hit'   => $closerhit,
             'label'        => 'Intro/conclusion template pattern',
-            'description'  => 'AI consistently adds generic introductory sentences and conclusion paragraphs even to short answers.',
+            'description'  => 'AI consistently adds generic introductory sentences and conclusion paragraphs even to '
+                . 'short answers.',
             'fired'        => $points > 0,
         ];
     }
 
+    /**
+     * S8 — measure word-trigram uniqueness across the section.
+     *
+     * Low uniqueness indicates repeated or templated phrasing. Returns zero points
+     * for sections of fewer than 20 words.
+     *
+     * @param string[] $words Tokenised section words, in order, as returned by words().
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_trigram_repetition(array $words): array {
         $n = count($words);
         if ($n < 20) {
@@ -538,9 +726,13 @@ class analyser {
         $unique = count(array_unique($trigrams));
         $ratio  = $total > 0 ? round($unique / $total, 4) : 1.0;
         $points = 0;
-        if ($ratio < 0.50)     { $points = 8; }
-        elseif ($ratio < 0.65) { $points = 4; }
-        elseif ($ratio < 0.75) { $points = 2; }
+        if ($ratio < 0.50) {
+            $points = 8;
+        } else if ($ratio < 0.65) {
+            $points = 4;
+        } else if ($ratio < 0.75) {
+            $points = 2;
+        }
 
         return [
             'points'       => $points,
@@ -549,11 +741,20 @@ class analyser {
             'unique'       => $unique,
             'unique_ratio' => $ratio,
             'label'        => 'Trigram repetition',
-            'description'  => 'Copy-paste and templated content produces low trigram uniqueness. Authentic writing has high phrase diversity.',
+            'description'  => 'Copy-paste and templated content produces low trigram uniqueness. Authentic writing '
+                . 'has high phrase diversity.',
             'fired'        => $points > 0,
         ];
     }
 
+    /**
+     * S9 — measure how many sentences begin with the same small set of openers.
+     *
+     * Returns zero points for sections of fewer than five sentences.
+     *
+     * @param string $text The section text.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_sentence_starts(string $text): array {
         $sentences = self::split_sentences($text);
         $n         = count($sentences);
@@ -565,13 +766,19 @@ class analyser {
         foreach ($sentences as $s) {
             $sl = strtolower(ltrim($s));
             foreach (self::UNIFORM_STARTS as $starter) {
-                if (strpos($sl, $starter) === 0) { $uniform++; break; }
+                if (strpos($sl, $starter) === 0) {
+                    $uniform++;
+                    break;
+                }
             }
         }
         $ratio = round($uniform / $n, 4);
         $points = 0;
-        if ($ratio >= 0.65)     { $points = 6; }
-        elseif ($ratio >= 0.50) { $points = 3; }
+        if ($ratio >= 0.65) {
+            $points = 6;
+        } else if ($ratio >= 0.50) {
+            $points = 3;
+        }
 
         return [
             'points'        => $points,
@@ -580,11 +787,22 @@ class analyser {
             'total'         => $n,
             'uniform_ratio' => $ratio,
             'label'         => 'Sentence-start uniformity (perplexity proxy)',
-            'description'   => 'AI often starts many consecutive sentences with "The", "It", "This", "In", etc. — a low-perplexity pattern.',
+            'description'   => 'AI often starts many consecutive sentences with "The", "It", "This", "In", etc. — a '
+                . 'low-perplexity pattern.',
             'fired'         => $points > 0,
         ];
     }
 
+    /**
+     * S10 — flag type-token ratios at either extreme.
+     *
+     * A very high ratio in long text suggests machine polishing; a very low ratio
+     * suggests verbatim copying. Returns zero points below 80 words.
+     *
+     * @param string[] $words Tokenised section words as returned by words().
+     * @param int $wcount Number of recognised words in the section.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_vocab_richness(array $words, int $wcount): array {
         if ($wcount < 80) {
             return ['points' => 0, 'max' => 6, 'ttr' => null, 'label' => 'Vocabulary richness extremity', 'fired' => false,
@@ -593,9 +811,13 @@ class analyser {
         $ttr    = round(count(array_unique($words)) / $wcount, 4);
         $points = 0;
         // Very high TTR in long text = AI polishing; very low = copying.
-        if ($ttr > 0.90 && $wcount >= 100)    { $points = 6; }
-        elseif ($ttr > 0.85 && $wcount >= 150){ $points = 3; }
-        elseif ($ttr < 0.35 && $wcount >= 150){ $points = 4; } // copy-paste repetition
+        if ($ttr > 0.90 && $wcount >= 100) {
+            $points = 6;
+        } else if ($ttr > 0.85 && $wcount >= 150) {
+            $points = 3;
+        } else if ($ttr < 0.35 && $wcount >= 150) {
+            $points = 4;
+        } // copy-paste repetition
 
         return [
             'points'      => $points,
@@ -603,11 +825,22 @@ class analyser {
             'ttr'         => $ttr,
             'word_count'  => $wcount,
             'label'       => 'Vocabulary richness extremity',
-            'description' => 'Extremely high Type-Token Ratio in long text suggests AI polish. Very low TTR suggests verbatim copying.',
+            'description' => 'Extremely high Type-Token Ratio in long text suggests AI polish. Very low TTR suggests '
+                . 'verbatim copying.',
             'fired'       => $points > 0,
         ];
     }
 
+    /**
+     * S11 — compare style measurements between the sections of one document.
+     *
+     * Uses the mean sentence length from S2 and the type-token ratio from S10 of each
+     * section; a large spread suggests the sections were not all written the same way.
+     *
+     * @param array $sections Per-section results from score_section(), each with a
+     *                        "signals" sub-array.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     */
     private static function signal_cross_section_inconsistency(array $sections): array {
         $means    = [];
         $ttrs     = [];
@@ -620,20 +853,24 @@ class analyser {
             }
         }
 
-        $mean_std = count($means) >= 2 ? self::std_dev($means) : 0;
-        $ttr_std  = count($ttrs)  >= 2 ? self::std_dev($ttrs)  : 0;
+        $meanstd = count($means) >= 2 ? self::std_dev($means) : 0;
+        $ttrstd  = count($ttrs) >= 2 ? self::std_dev($ttrs) : 0;
 
         $points = 0;
-        if ($mean_std > 6 || $ttr_std > 0.15)    { $points = 10; }
-        elseif ($mean_std > 4 || $ttr_std > 0.10) { $points = 5; }
+        if ($meanstd > 6 || $ttrstd > 0.15) {
+            $points = 10;
+        } else if ($meanstd > 4 || $ttrstd > 0.10) {
+            $points = 5;
+        }
 
         return [
             'points'       => $points,
             'max'          => 10,
-            'mean_std_dev' => round($mean_std, 2),
-            'ttr_std_dev'  => round($ttr_std, 4),
+            'mean_std_dev' => round($meanstd, 2),
+            'ttr_std_dev'  => round($ttrstd, 4),
             'label'        => 'Cross-section writing style inconsistency',
-            'description'  => 'Large variation in sentence length or vocabulary richness across questions suggests different sources or authors per question.',
+            'description'  => 'Large variation in sentence length or vocabulary richness across questions suggests '
+                . 'different sources or authors per question.',
             'fired'        => $points > 0,
         ];
     }
@@ -641,6 +878,12 @@ class analyser {
     /**
      * Compute cross-student Jaccard similarity between this submission and all others.
      * Returns array of ['userid', 'username', 'fullname', 'similarity', 'subid'].
+     *
+     * @param int $subid The submission record being compared.
+     * @param int $cmid The course module the submission belongs to.
+     * @param string $normtext The normalised text of this submission.
+     * @return array Up to ten matches, highest similarity first, each with subid,
+     *               userid, fullname, username, risklevel and similarity (0.0-1.0).
      */
     public static function cross_student_similarity(int $subid, int $cmid, string $normtext): array {
         global $DB;
@@ -649,28 +892,62 @@ class analyser {
             return [];
         }
 
-        $bg_a    = question_parser::bigrams($normtext);
+        // V1.0.80: bigram SETS, computed once for this document and once per other
+        // document, compared with jaccard_sets(). Identical scores to the previous
+        // bigrams()/jaccard() pair — see the harness in the release notes — without
+        // flipping and merging arrays on every comparison.
+        $bga    = question_parser::bigram_set($normtext);
         $others  = $DB->get_records_select(
             'plagiarism_docguard_sub',
             'cmid = :cmid AND id != :subid AND status = :status AND normtext IS NOT NULL',
             ['cmid' => $cmid, 'subid' => $subid, 'status' => 'analysed']
         );
 
-        $results = [];
+        // V1.0.85 PERF-FIX-DG-SIMILARITY-N1: the user record was fetched inside the loop,
+        // one query per match. On an activity with a shared source document - a class
+        // working from the same template, which is exactly when this feature has anything
+        // to report - most comparisons match, so the query count grew with the size of the
+        // cohort, and the whole method already runs once per submission. Collect the
+        // matches first, then fetch every user in one query.
+        $matches = [];
         foreach ($others as $other) {
-            $bg_b  = question_parser::bigrams((string)$other->normtext);
-            $score = question_parser::jaccard($bg_a, $bg_b);
+            $bgb  = question_parser::bigram_set((string)$other->normtext);
+            $score = question_parser::jaccard_sets($bga, $bgb);
             if ($score >= 0.30) {
-                $user = $DB->get_record('user', ['id' => $other->userid], 'id, username, firstname, lastname', IGNORE_MISSING);
-                $results[] = [
-                    'subid'      => $other->id,
-                    'userid'     => $other->userid,
-                    'username'   => $user ? $user->username : '?',
-                    'fullname'   => $user ? fullname($user) : 'Unknown',
-                    'similarity' => $score,
-                    'risklevel'  => $other->overall_risklevel,
-                ];
+                $matches[] = [$other, $score];
             }
+        }
+
+        if (empty($matches)) {
+            return [];
+        }
+
+        $userids = array_values(
+            array_unique(array_map(
+                static fn($m) => (int)$m[0]->userid,
+                $matches
+                ))
+        );
+        [$insql, $inparams] = $DB->get_in_or_equal($userids, SQL_PARAMS_NAMED, 'u');
+        $users = $DB->get_records_select(
+            'user',
+            "id $insql",
+            $inparams,
+            '',
+            'id, username, firstname, lastname'
+        );
+
+        $results = [];
+        foreach ($matches as [$other, $score]) {
+            $user = $users[(int)$other->userid] ?? null;
+            $results[] = [
+                'subid'      => $other->id,
+                'userid'     => $other->userid,
+                'username'   => $user ? $user->username : '?',
+                'fullname'   => $user ? fullname($user) : 'Unknown',
+                'similarity' => $score,
+                'risklevel'  => $other->overall_risklevel,
+            ];
         }
 
         usort($results, fn($a, $b) => $b['similarity'] <=> $a['similarity']);
@@ -679,49 +956,136 @@ class analyser {
 
     /**
      * Compute S12 (cross-student) score for a submission given similarity results.
-     * Mutates $sub_record's overall score in-place.
+     * Pure: it reads the highest similarity found and returns the signal record; the
+     * caller is responsible for folding the points into the submission's overall score.
+     *
+     * @param float $maxsimilarity The highest similarity found against any other
+     *                              submission in the same activity, 0.0-1.0.
+     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
      */
-    public static function compute_s12_score(float $max_similarity): array {
+    public static function compute_s12_score(float $maxsimilarity): array {
         $points = 0;
-        if ($max_similarity >= 0.75)     { $points = 15; }
-        elseif ($max_similarity >= 0.55) { $points = 8; }
-        elseif ($max_similarity >= 0.35) { $points = 3; }
+        if ($maxsimilarity >= 0.75) {
+            $points = 15;
+        } else if ($maxsimilarity >= 0.55) {
+            $points = 8;
+        } else if ($maxsimilarity >= 0.35) {
+            $points = 3;
+        }
 
         return [
             'points'         => $points,
             'max'            => 15,
-            'max_similarity' => $max_similarity,
+            'max_similarity' => $maxsimilarity,
             'label'          => 'Cross-student submission similarity',
-            'description'    => 'Compares this submission against all other students in the same assignment using Jaccard bigram similarity.',
+            'description'    => 'Compares this submission against all other students in the same assignment using '
+                . 'Jaccard bigram similarity.',
             'fired'          => $points > 0,
         ];
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
+    /**
+     * Map a 0-100 risk score onto its risk band.
+     *
+     * @param float $score The risk score, 0-100.
+     * @return string One of "low" (0-34), "medium" (35-64) or "high" (65-100).
+     */
     public static function band(float $score): string {
-        if ($score >= 65) { return 'high'; }
-        if ($score >= 35) { return 'medium'; }
+        if ($score >= 65) {
+            return 'high';
+        }
+        if ($score >= 35) {
+            return 'medium';
+        }
         return 'low';
     }
 
+    /**
+     * Tokenise text into words of two or more characters, in any script.
+     *
+     * @param string $text The text to tokenise.
+     * @return string[] The words found, in document order.
+     */
     private static function words(string $text): array {
-        return array_values(array_filter(
-            preg_split('/[^a-z0-9\']+/', $text),
-            fn($w) => strlen($w) >= 2
-        ));
+        // V1.0.80: was /[^a-z0-9']+/ — an ASCII-only tokeniser. Anything outside a-z0-9
+        // was a word separator, so "café" split into "caf", "Müller" into "ller", and a
+        // Cyrillic or Greek paragraph produced NO words at all. Every downstream number
+        // (word count, TTR, trigram uniqueness, sentence length) was therefore wrong for
+        // accented Latin text and meaningless for other alphabets, while still being
+        // reported to teachers as a risk score.
+        //
+        // \p{L}\p{N}\p{M} with /u keeps letters, digits and combining marks in any script.
+        $split = preg_split('/[^\p{L}\p{N}\p{M}\']+/u', $text);
+        if ($split === false) {
+            // Malformed UTF-8 — keep the old behaviour rather than returning nothing.
+            $split = preg_split('/[^a-z0-9\']+/', $text);
+        }
+        return array_values(
+            array_filter(
+                $split,
+                fn($w) => \core_text::strlen($w) >= 2
+                )
+        );
     }
 
+    /**
+     * Proportion of the document's letters that are Latin-script.
+     *
+     * v1.0.80: DocGuard's twelve signals are English-language heuristics — an English
+     * AI-marker phrase list, English transition words, English contractions, an English
+     * passive-voice regex, English template openers. Run against a Chinese, Arabic,
+     * Russian or Greek document they all stay silent, and the plugin confidently reports
+     * "0/100 LOW risk" — a score that says only "this document is not in English", while
+     * looking to a teacher exactly like a document that was checked and cleared. That is
+     * worse than no answer.
+     *
+     * @param string $text The document text to measure.
+     * @return float Proportion of the document's letters that are Latin-script, from 0.0 to
+     *               1.0; 1.0 when the document contains no letters at all, so that an
+     *               unmeasurable document is never treated as non-English.
+     */
+    private static function latin_letter_ratio(string $text): float {
+        $letters = @preg_match_all('/\p{L}/u', $text);
+        if ($letters === false || $letters === 0) {
+            return 1.0; // Not measurable — do not block on it.
+        }
+        $latin = @preg_match_all('/\p{Latin}/u', $text);
+        if ($latin === false) {
+            return 1.0;
+        }
+        return $latin / $letters;
+    }
+
+    /**
+     * Split text into sentences on terminal punctuation.
+     *
+     * Fragments of five characters or fewer are discarded as noise.
+     *
+     * @param string $text The text to split.
+     * @return string[] The sentences found, in document order.
+     */
     private static function split_sentences(string $text): array {
-        return array_values(array_filter(
-            preg_split('/(?<=[.!?])\s+/', $text),
-            fn($s) => strlen(trim($s)) > 5
-        ));
+        return array_values(
+            array_filter(
+                preg_split('/(?<=[.!?])\s+/', $text),
+                fn($s) => strlen(trim($s)) > 5
+                )
+        );
     }
 
+    /**
+     * Population standard deviation of a list of numbers.
+     *
+     * @param float[] $values The values to measure.
+     * @return float The standard deviation, or 0.0 for fewer than two values.
+     */
     private static function std_dev(array $values): float {
         $n = count($values);
-        if ($n < 2) { return 0.0; }
+        if ($n < 2) {
+            return 0.0;
+        }
         $mean = array_sum($values) / $n;
         $var  = array_sum(array_map(fn($v) => ($v - $mean) ** 2, $values)) / $n;
         return sqrt($var);

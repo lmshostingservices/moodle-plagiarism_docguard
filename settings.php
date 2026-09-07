@@ -15,11 +15,30 @@
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
 /**
- * plagiarism_docguard file.
+ * DocGuard settings page.
+ *
+ * v1.0.83: REVERTED to the standalone admin_externalpage pattern, which is what the
+ * sibling plugin Essay Guard uses and what actually works.
+ *
+ * v1.0.80 converted this file into an $settings->add() admin-tree fragment on the
+ * diagnosis that admin_externalpage_setup('plagiarismdocguard') was failing with
+ * "Section error". That diagnosis was wrong, and it was never tested against a running
+ * Moodle. Verified live: /admin/settings.php?section=plagiarismessayguard returns the
+ * SAME "Section error" for Essay Guard, whose settings page works perfectly - because
+ * that URL is simply not how plagiarism plugin settings are reached. Core registers an
+ * admin_externalpage per plagiarism plugin pointing directly at
+ * /plagiarism/<name>/settings.php, which is the URL the Plugins overview "Settings" link
+ * actually uses.
+ *
+ * So the original page was fine, and the "fix" broke it: as an admin-tree fragment this
+ * file produced a blank white page at the URL the Settings link points to, because
+ * nothing there supplies $settings or $ADMIN.
+ *
+ * Structure below mirrors essayguard/settings.php exactly.
  *
  * @package    plagiarism_docguard
  * @copyright  2026 LMS-Labs
- * @license    http://www.gnu.org/licenses/gpl-3.0.html GNU GPL v3 or later
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
 require_once(dirname(dirname(__FILE__)) . '/../config.php');
@@ -33,144 +52,177 @@ admin_externalpage_setup('plagiarismdocguard');
 $context = context_system::instance();
 require_capability('moodle/site:config', $context);
 
+// Handle form submission.
 if (optional_param('save', false, PARAM_BOOL) && confirm_sesskey()) {
-    set_config('siteid',          optional_param('siteid',          '', PARAM_ALPHANUMEXT), 'plagiarism_docguard');
-    set_config('apikey',          optional_param('apikey',          '', PARAM_TEXT),        'plagiarism_docguard');
-    set_config('enabled',         optional_param('enabled',         0,  PARAM_BOOL),        'plagiarism_docguard');
-    set_config('retentiondays',   optional_param('retentiondays',   90, PARAM_INT),         'plagiarism_docguard');
-    set_config('minsectionwords', optional_param('minsectionwords', 30, PARAM_INT),         'plagiarism_docguard');
-    // FIX-DG-BACKFILL-OPTIN (v1.0.78): off by default — see lang string.
-    set_config('enablebackfill',  optional_param('enablebackfill',  0,  PARAM_BOOL),        'plagiarism_docguard');
-    set_config('unlock_cache_result', '', 'plagiarism_docguard');
-    set_config('unlock_cache_time',   0,  'plagiarism_docguard');
-    plagiarism_docguard_check_unlock();
+    set_config('siteid', optional_param('siteid', '', PARAM_ALPHANUMEXT), 'plagiarism_docguard');
+    set_config('apikey', optional_param('apikey', '', PARAM_TEXT), 'plagiarism_docguard');
+    set_config('enabled', optional_param('enabled', 0, PARAM_BOOL), 'plagiarism_docguard');
+    set_config('minsectionwords', optional_param('minsectionwords', 30, PARAM_INT), 'plagiarism_docguard');
+    set_config('enablebackfill', optional_param('enablebackfill', 0, PARAM_BOOL), 'plagiarism_docguard');
+    set_config('retentiondays', optional_param('retentiondays', 90, PARAM_INT), 'plagiarism_docguard');
+
+    // V1.0.85: drop the cached licence verdict. Since FIX-DG-UNLICENSED-FAILS-OPEN a site
+    // with no credentials caches a NEGATIVE result, so an administrator who has just
+    // pasted their Site ID and API Key in would otherwise sit and watch the plugin report
+    // itself unlicensed until the cache expired. The next check re-derives from scratch.
+    unset_config('unlock_cache_result', 'plagiarism_docguard');
+    unset_config('unlock_cache_time', 'plagiarism_docguard');
+
     redirect(
         new moodle_url('/plagiarism/docguard/settings.php'),
-        get_string('savedconfigsuccess', 'plagiarism_docguard'),
+        get_string('savedconfig', 'plagiarism_docguard'),
         null,
         \core\output\notification::NOTIFY_SUCCESS
     );
 }
 
-$connection_test_result = null;
-if (optional_param('testconnection', false, PARAM_BOOL) && confirm_sesskey()) {
-    set_config('unlock_cache_result', '', 'plagiarism_docguard');
-    set_config('unlock_cache_time',   0,  'plagiarism_docguard');
-    $connection_test_result = plagiarism_docguard_check_unlock();
-}
-
-$cfg             = (array) get_config('plagiarism_docguard');
-$siteid          = $cfg['siteid']          ?? '';
-$apikey          = $cfg['apikey']          ?? '';
-$enabled         = !empty($cfg['enabled']);
-$retentiondays   = (int)($cfg['retentiondays']   ?? 90);
-$minsectionwords = (int)($cfg['minsectionwords'] ?? 30);
-$enablebackfill  = !empty($cfg['enablebackfill']);
-
-$creds_configured = (!empty($siteid) || !empty(get_config('local_aiconfig', 'siteid')))
-                 && (!empty($apikey) || !empty(get_config('local_aiconfig', 'apikey')));
-
-$cached_result = get_config('plagiarism_docguard', 'unlock_cache_result');
-$cached_time   = (int)get_config('plagiarism_docguard', 'unlock_cache_time');
-if ($creds_configured && ($cached_time === 0 || (time() - $cached_time) >= 1800)) {
-    plagiarism_docguard_check_unlock();
-    $cached_result = get_config('plagiarism_docguard', 'unlock_cache_result');
-    $cached_time   = (int)get_config('plagiarism_docguard', 'unlock_cache_time');
-}
-
-$cache_age_min      = $cached_time > 0 ? (int)round((time() - $cached_time) / 60) : null;
-$is_unlocked_cached = $cached_time > 0 && !empty($cached_result);
-$cache_fresh        = $cached_time > 0 && (time() - $cached_time) < 1800;
+$siteid         = (string)(plagiarism_docguard_get_siteid() ?: '');
+$apikey         = (string)(plagiarism_docguard_get_apikey() ?: '');
+$enabled        = (int)get_config('plagiarism_docguard', 'enabled');
+// V1.0.84: `?:` fires on a deliberate 0 as well as on the unset key, so an admin who
+// entered 0 (analyse every section, however short) saw 30 come back. Same trap as
+// retentiondays above; only the never-saved sentinels take the default.
+$minsecwordsraw = get_config('plagiarism_docguard', 'minsectionwords');
+$minsecwords    = ($minsecwordsraw === false || $minsecwordsraw === null || $minsecwordsraw === '')
+    ? 30 : (int)$minsecwordsraw;
+$enablebackfill = (int)get_config('plagiarism_docguard', 'enablebackfill');
+$retentiondays  = plagiarism_docguard_retention_days();
 
 echo $OUTPUT->header();
 echo $OUTPUT->heading(get_string('pluginname', 'plagiarism_docguard'));
 
-$ps = 'padding:1rem 1.25rem;border-radius:6px;margin-bottom:1.5rem;border:1px solid ';
-if ($connection_test_result !== null) {
-    if ($connection_test_result) {
-        echo '<div style="' . $ps . '#4caf5066;background:#e8f5e9;color:#1b5e20;"><strong>&#x2714; DocGuard is UNLOCKED</strong> — analysis is active for all enabled assignment activities.</div>';
-    } else {
-        echo '<div style="' . $ps . '#e5393566;background:#ffebee;color:#b71c1c;"><strong>&#x2718; DocGuard is NOT UNLOCKED</strong><br><small>Visit <a href="https://lms-labs.com" target="_blank">lms-labs.com</a> to unlock (5,000 credits).</small></div>';
-    }
-} elseif (!$creds_configured) {
-    echo '<div style="' . $ps . '#ff980066;background:#fff3e0;color:#e65100;"><strong>&#x26a0; Credentials not configured</strong> — enter your Site ID and API Key below.</div>';
-} elseif ($cache_fresh && $is_unlocked_cached) {
-    echo '<div style="' . $ps . '#4caf5066;background:#e8f5e9;color:#1b5e20;"><strong>&#x2714; DocGuard UNLOCKED</strong> (last verified ' . $cache_age_min . ' min ago).</div>';
-} elseif ($cache_fresh && !$is_unlocked_cached) {
-    echo '<div style="' . $ps . '#e5393566;background:#ffebee;color:#b71c1c;"><strong>&#x2718; DocGuard NOT UNLOCKED</strong> (last checked ' . $cache_age_min . ' min ago).</div>';
+// Status panel - CACHED config only. No vendor API call on a render path.
+$notices = [];
+if (empty($CFG->enableplagiarism)) {
+    $notices[] = ['warn', get_string(
+        'enableplagiarismnotice',
+        'plagiarism_docguard',
+        (new moodle_url('/admin/search.php', ['query' => 'enableplagiarism']))->out()
+    )];
+}
+if ($siteid === '' || $apikey === '') {
+    $notices[] = ['warn', get_string('nocredentialsnotice', 'plagiarism_docguard')];
 } else {
-    echo '<div style="' . $ps . '#9e9e9e66;background:#fafafa;color:#424242;"><strong>&#x25cc; Unlock status unknown</strong> — click Test Connection below.</div>';
+    // V1.0.85: say where the credentials in force come from. The accessors silently
+    // prefer local_aiconfig when that plugin supplies a value, so without this an
+    // administrator could edit the field below, save, and watch the old value return
+    // with nothing on the page explaining why.
+    $credsource = plagiarism_docguard_credential_source();
+    if ($credsource === 'local_aiconfig') {
+        $notices[] = ['info', get_string('credsfromaiconfig', 'plagiarism_docguard')];
+    } else if ($credsource === 'mixed') {
+        $notices[] = ['warn', get_string('credsfrommixed', 'plagiarism_docguard')];
+    }
+
+    $cachedtime   = (int)get_config('plagiarism_docguard', 'unlock_cache_time');
+    $cachedresult = get_config('plagiarism_docguard', 'unlock_cache_result');
+    if ($cachedtime <= 0) {
+        $notices[] = ['info', get_string('unlockunknown', 'plagiarism_docguard')];
+    } else {
+        $agemin = (int)round((time() - $cachedtime) / 60);
+        $notices[] = empty($cachedresult)
+            ? ['warn', get_string('unlocklocked', 'plagiarism_docguard', $agemin)]
+            : ['ok', get_string('unlockunlocked', 'plagiarism_docguard', $agemin)];
+    }
+}
+$palette = [
+    'ok'   => ['#4caf5066', '#e8f5e9', '#1b5e20'],
+    'warn' => ['#ff980066', '#fff3e0', '#e65100'],
+    'info' => ['#9e9e9e66', '#fafafa', '#424242'],
+];
+foreach ($notices as [$kind, $text]) {
+    [$border, $bg, $fg] = $palette[$kind];
+    echo html_writer::div(
+        $text,
+        '',
+        ['style' =>
+            'padding:0.75rem 1rem;border-radius:6px;margin-bottom:0.75rem;'
+            . "border:1px solid {$border};background:{$bg};color:{$fg};"]
+    );
 }
 
-$actionurl = new moodle_url('/plagiarism/docguard/settings.php');
-?>
-<form action="<?php echo $actionurl; ?>" method="post">
-    <input type="hidden" name="sesskey" value="<?php echo sesskey(); ?>">
-    <input type="hidden" name="save" value="1">
-    <table class="admintable generaltable" cellspacing="0">
-        <tbody>
-            <tr>
-                <td class="cell c0"><label for="id_siteid"><?php echo get_string('siteid', 'plagiarism_docguard'); ?></label></td>
-                <td class="cell c1">
-                    <input type="text" id="id_siteid" name="siteid" value="<?php echo s($siteid); ?>" size="40">
-                    <div class="form-text"><?php echo get_string('siteid_desc', 'plagiarism_docguard'); ?></div>
-                </td>
-            </tr>
-            <tr>
-                <td class="cell c0"><label for="id_apikey"><?php echo get_string('apikey', 'plagiarism_docguard'); ?></label></td>
-                <td class="cell c1">
-                    <input type="password" id="id_apikey" name="apikey" value="<?php echo s($apikey); ?>" size="40" autocomplete="new-password">
-                    <div class="form-text"><?php echo get_string('apikey_desc', 'plagiarism_docguard'); ?></div>
-                </td>
-            </tr>
-            <tr>
-                <td class="cell c0"><label for="id_enabled"><?php echo get_string('enabled', 'plagiarism_docguard'); ?></label></td>
-                <td class="cell c1">
-                    <input type="checkbox" id="id_enabled" name="enabled" value="1" <?php echo $enabled ? 'checked' : ''; ?>>
-                    <div class="form-text"><?php echo get_string('enabled_desc', 'plagiarism_docguard'); ?></div>
-                </td>
-            </tr>
-            <tr>
-                <td class="cell c0"><label for="id_minsectionwords"><?php echo get_string('minsectionwords', 'plagiarism_docguard'); ?></label></td>
-                <td class="cell c1">
-                    <input type="number" id="id_minsectionwords" name="minsectionwords" value="<?php echo $minsectionwords; ?>" min="5" max="500">
-                    <div class="form-text"><?php echo get_string('minsectionwords_desc', 'plagiarism_docguard'); ?></div>
-                </td>
-            </tr>
-            <tr>
-                <td class="cell c0"><label for="id_enablebackfill"><?php echo get_string('enablebackfill', 'plagiarism_docguard'); ?></label></td>
-                <td class="cell c1">
-                    <input type="checkbox" id="id_enablebackfill" name="enablebackfill" value="1" <?php echo $enablebackfill ? 'checked' : ''; ?>>
-                    <div class="form-text"><?php echo get_string('enablebackfill_desc', 'plagiarism_docguard'); ?></div>
-                </td>
-            </tr>
-            <tr>
-                <td class="cell c0"><label for="id_retentiondays"><?php echo get_string('retentiondays', 'plagiarism_docguard'); ?></label></td>
-                <td class="cell c1">
-                    <input type="number" id="id_retentiondays" name="retentiondays" value="<?php echo $retentiondays; ?>" min="0" max="3650">
-                    <div class="form-text"><?php echo get_string('retentiondays_desc', 'plagiarism_docguard'); ?></div>
-                </td>
-            </tr>
-        </tbody>
-    </table>
-    <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;">
-        <input type="submit" class="btn btn-primary" value="<?php echo get_string('savechanges'); ?>">
-    </div>
-</form>
-
-<form action="<?php echo $actionurl; ?>" method="post" style="margin-top:1rem;">
-    <input type="hidden" name="sesskey" value="<?php echo sesskey(); ?>">
-    <input type="hidden" name="testconnection" value="1">
-    <button type="submit" class="btn btn-secondary">Test Connection &amp; Unlock Status</button>
-    <small style="margin-left:0.5rem;color:#666;">Forces a live check to lms-labs.com.</small>
-</form>
-
-<?php
-echo html_writer::tag('div',
-    '<strong>Supported file types:</strong> PDF (.pdf) and Word documents (.docx). '
-    . 'DocGuard analyses each submission\'s text, detects question/answer sections, and scores across 12 plagiarism and AI-detection signals. '
-    . '<strong>To unlock:</strong> Log in to <a href="https://lms-labs.com" target="_blank">lms-labs.com</a> → Dashboard → Plugins → DocGuard → Unlock (5,000 credits).',
-    ['style' => 'margin-top:1.25rem;padding:0.75rem 1rem;background:#f5f5f5;border-radius:4px;font-size:0.9rem;']
+echo html_writer::start_tag(
+    'form',
+    ['method' => 'post',
+        'action' => (new moodle_url('/plagiarism/docguard/settings.php'))->out(false)]
 );
+echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'sesskey', 'value' => sesskey()]);
+echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'save', 'value' => '1']);
+echo html_writer::start_tag('table', ['class' => 'generaltable', 'style' => 'max-width:900px;']);
+
+$row = function ($labelkey, $field) {
+    echo html_writer::start_tag('tr');
+    echo html_writer::tag(
+        'td',
+        html_writer::tag('strong', get_string($labelkey, 'plagiarism_docguard'))
+            . html_writer::tag(
+            'div',
+            get_string($labelkey . '_desc', 'plagiarism_docguard'),
+            ['style' => 'font-size:0.85em;color:#666;']
+            ),
+        ['style' => 'padding:0.6rem 1rem 0.6rem 0;width:45%;']
+    );
+    echo html_writer::tag('td', $field, ['style' => 'padding:0.6rem 0;']);
+    echo html_writer::end_tag('tr');
+};
+
+$row(
+    'siteid',
+    html_writer::empty_tag('input', ['type' => 'text', 'name' => 'siteid',
+        'value' => $siteid, 'class' => 'form-control', 'style' => 'max-width:420px;'])
+);
+$row(
+    'apikey',
+    html_writer::empty_tag('input', ['type' => 'password', 'name' => 'apikey',
+        'value' => $apikey, 'class' => 'form-control', 'style' => 'max-width:420px;'])
+);
+$row(
+    'enabled',
+    html_writer::empty_tag('input', ['type' => 'checkbox', 'name' => 'enabled',
+        'value' => '1'] + ($enabled ? ['checked' => 'checked'] : []))
+);
+$row(
+    'minsectionwords',
+    html_writer::empty_tag('input', ['type' => 'number', 'name' => 'minsectionwords',
+        'value' => $minsecwords, 'class' => 'form-control', 'style' => 'max-width:140px;'])
+);
+$row(
+    'enablebackfill',
+    html_writer::empty_tag('input', ['type' => 'checkbox', 'name' => 'enablebackfill',
+        'value' => '1'] + ($enablebackfill ? ['checked' => 'checked'] : []))
+);
+$row(
+    'retentiondays',
+    html_writer::empty_tag('input', ['type' => 'number', 'name' => 'retentiondays',
+        'value' => $retentiondays, 'class' => 'form-control', 'style' => 'max-width:140px;'])
+);
+
+echo html_writer::end_tag('table');
+echo html_writer::div(
+    html_writer::empty_tag('input', ['type' => 'submit',
+        'value' => get_string('savechanges'), 'class' => 'btn btn-primary']),
+    '',
+    ['style' => 'margin:1rem 0;']
+);
+echo html_writer::end_tag('form');
+
+$testurl = new moodle_url('/plagiarism/docguard/testconnection.php', ['sesskey' => sesskey()]);
+echo html_writer::div(
+    html_writer::link(
+        $testurl,
+        get_string('testconnection', 'plagiarism_docguard'),
+        ['class' => 'btn btn-secondary']
+    )
+    . ' ' . html_writer::tag(
+        'small',
+        get_string('testconnection_desc', 'plagiarism_docguard'),
+        ['style' => 'margin-left:0.5rem;color:#666;']
+    ),
+    '',
+    ['style' => 'margin-bottom:1rem;']
+);
+
+echo html_writer::tag('h3', get_string('aboutheading', 'plagiarism_docguard'));
+echo html_writer::div(get_string('about_desc', 'plagiarism_docguard'));
 
 echo $OUTPUT->footer();

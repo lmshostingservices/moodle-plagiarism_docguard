@@ -17,18 +17,40 @@
 /**
  * Post-installation hook for plagiarism_docguard.
  *
- * Automatically enables Moodle's global plagiarism support so admins do not
- * need to manually visit Site Administration → Advanced features and tick
- * "Enable plagiarism plugins" before DocGuard becomes accessible.
+ * v1.0.80: REMOVED set_config('enableplagiarism', 1).
+ *
+ * What was wrong: that writes a CORE site setting — the master switch for Moodle's whole
+ * plagiarism subsystem, which affects every plagiarism plugin on the site, not just this
+ * one. Installing a plugin silently turned on a site-wide feature the administrator had
+ * not asked for and would not be told about, and it did so with no way to know the site
+ * had deliberately left it off (some institutions disable it for legal reasons). A plugin
+ * may write only its own configuration namespace; core settings belong to the
+ * administrator.
+ *
+ * What replaces it: settings.php shows a prominent notice, with a direct link to Advanced
+ * features, whenever $CFG->enableplagiarism is off — so the administrator is told exactly
+ * what to switch on, and chooses to. plagiarism_docguard_is_enabled() also refuses to
+ * process anything while that core switch is off, so nothing runs half-configured.
+ *
+ * The function is retained (rather than deleting the file) so that Moodle's installer has
+ * the hook it expects and any future install-time work has a home.
  *
  * @package    plagiarism_docguard
- * @copyright  2026 EssayGraderAI
+ * @copyright  2026 LMS-Labs
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
-defined('MOODLE_INTERNAL') || die();
-
+/**
+ * Post-installation hook for plagiarism_docguard.
+ *
+ * DocGuard ships switched off and stores student document text, so it deliberately
+ * writes no configuration here: an administrator enables it at
+ * Site administration > Plugins > Plagiarism > DocGuard.
+ *
+ * @return bool Always true.
+ */
 function xmldb_plagiarism_docguard_install() {
-    set_config('enableplagiarism', 1);
+    // Nothing to do. DocGuard ships switched OFF and is configured by an administrator
+    // at Site administration → Plugins → Plagiarism → DocGuard.
     return true;
 }

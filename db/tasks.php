@@ -18,7 +18,7 @@
  * Scheduled tasks for plagiarism_docguard.
  *
  * @package    plagiarism_docguard
- * @copyright  2026 EssayGraderAI
+ * @copyright  2026 LMS-Labs
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 

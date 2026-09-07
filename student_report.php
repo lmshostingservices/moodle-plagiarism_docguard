@@ -19,7 +19,7 @@
  *
  * @package    plagiarism_docguard
  * @copyright  2026 LMS-Labs
- * @license    http://www.gnu.org/licenses/gpl-3.0.html GNU GPL v3 or later
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
 require_once(dirname(dirname(__FILE__)) . '/../config.php');
@@ -44,7 +44,36 @@ if (!plagiarism_docguard_can_view_reports($context)) {
     require_capability('plagiarism/docguard:viewreport', $context);
 }
 
-// ── Re-analyse POST handler ───────────────────────────────────────────────────
+/* ── Group mode ──────────────────────────────────────────────────────────────── */
+// V1.0.80: this page ignored group mode, like report.php did. In a SEPARATEGROUPS
+// activity a teacher restricted to one group could open any student's full DocGuard
+// report — name, file name, extracted answer text — simply by changing subid in the URL,
+// and the Cross-Student Similarity table at the bottom named students from other groups
+// and linked straight to their reports. Both are closed here: the subject must be
+// visible to this user, and the similarity list is filtered to the same set.
+$dgcourse     = get_course($cm->course);
+$dgallowedids = null;   // Null = no restriction.
+if (
+    groups_get_activity_groupmode($cm, $dgcourse) == SEPARATEGROUPS
+        && !has_capability('moodle/site:accessallgroups', $context)
+) {
+    $dgallowedids = [(int)$USER->id => true];
+    foreach (groups_get_activity_allowed_groups($cm) as $dggroup) {
+        // V1.0.81: see report.php - ['u.id'] produced `u.u.id` and fataled the page.
+        foreach (groups_get_groups_members([$dggroup->id], null, 'u.id') as $dgmember) {
+            $dgallowedids[(int)$dgmember->id] = true;
+        }
+    }
+    // V1.0.88: the access decision is now taken by plagiarism_docguard_user_visible() in
+    // lib.php, which report.php and reanalyse.php also use, so the four doors into this
+    // data cannot answer differently. The id map above is still built because the
+    // Cross-Student Similarity table at the bottom of this page is filtered through it.
+    if (!plagiarism_docguard_user_visible($cm, $context, (int)$sub->userid)) {
+        throw new \moodle_exception('nopermissions', 'error', '', get_string('studentreport', 'plagiarism_docguard'));
+    }
+}
+
+/* ── Re-analyse POST handler ─────────────────────────────────────────────────── */
 // Allows a teacher to force re-extraction + re-analysis of a submission that
 // was stored before the CMap-aware PDF extractor was installed (v1.0.52+).
 // The handler finds the original stored_file by contenthash, resets the DB
@@ -53,24 +82,54 @@ if (!plagiarism_docguard_can_view_reports($context)) {
 if (optional_param('reanalyse', 0, PARAM_INT) === 1) {
     require_sesskey();
 
-    $redirect_url = new moodle_url('/plagiarism/docguard/student_report.php', ['subid' => $subid]);
+    $redirecturl = new moodle_url('/plagiarism/docguard/student_report.php', ['subid' => $subid]);
+
+    // V1.0.80: re-analysis is processing, so it obeys the site-wide and per-activity
+    // switches like every other entry point.
+    if (!plagiarism_docguard_is_enabled() || !plagiarism_docguard_is_cm_active($cmid)) {
+        redirect(
+            $redirecturl,
+            get_string('reanalyseunavailable', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
+    }
+    // V1.0.88 FIX-DG-MANUAL-PATHS-UNLICENSED: the licence gate, which the observer and
+    // both cron tasks apply and this endpoint did not. See
+    // plagiarism_docguard_has_credentials() in lib.php.
+    if (!plagiarism_docguard_has_credentials()) {
+        redirect(
+            $redirecturl,
+            get_string('reanalyseunlicensed', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
+    }
 
     // Find the stored_file by contenthash. We search all files in the DB with
     // this hash (not a directory stub) then instantiate via file storage.
-    $filerecord = $DB->get_record_sql(
-        'SELECT id FROM {files} WHERE contenthash = ? AND filename != ? ORDER BY id DESC LIMIT 1',
-        [$sub->contenthash, '.']
-    );
+    // v1.0.80: shared helper instead of a raw "LIMIT 1" — see lib.php.
+    $fileid = plagiarism_docguard_find_file_id_by_hash((string)$sub->contenthash);
 
-    if (!$filerecord) {
-        redirect($redirect_url, 'Re-analyse failed: original file no longer exists in Moodle file storage.', null, \core\output\notification::NOTIFY_ERROR);
+    if (!$fileid) {
+        redirect(
+            $redirecturl,
+            get_string('reanalysefailednooriginal', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
     }
 
     $fs   = get_file_storage();
-    $file = $fs->get_file_by_id($filerecord->id);
+    $file = $fs->get_file_by_id($fileid);
 
     if (!$file || $file->is_directory()) {
-        redirect($redirect_url, 'Re-analyse failed: could not retrieve the original file.', null, \core\output\notification::NOTIFY_ERROR);
+        redirect(
+            $redirecturl,
+            get_string('reanalysefailednoretrieveoriginal', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
     }
 
     // Reset status to 'pending' so analyse_and_store proceeds (it skips if status='analysed').
@@ -86,97 +145,156 @@ if (optional_param('reanalyse', 0, PARAM_INT) === 1) {
             (int)$sub->submissionid,
             (int)$sub->contextid
         );
-        redirect($redirect_url, 'Re-analysis complete.', null, \core\output\notification::NOTIFY_SUCCESS);
+        redirect(
+            $redirecturl,
+            get_string('reanalysecomplete', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_SUCCESS
+        );
     } catch (\Throwable $e) {
-        // Restore status so the page still renders previous results.
-        $DB->set_field('plagiarism_docguard_sub', 'status', 'analysed', ['id' => $subid]);
-        redirect($redirect_url, 'Re-analyse failed: ' . $e->getMessage(), null, \core\output\notification::NOTIFY_ERROR);
+        // V1.0.80: mark the record 'error', NOT 'analysed'.
+        //
+        // "Restore status so the page still renders previous results" was wrong on its own
+        // terms — the section rows were deleted a few lines above, so there were no
+        // previous results left to render. What it actually produced was a record claiming
+        // to be a finished analysis with an empty breakdown, and that state is a dead end:
+        // observer::analyse_and_store() returns early on status='analysed', process_pending
+        // Phase 1 only picks up status='pending', and report.php only offers its Analyse
+        // action for pending/error rows. The submission could never be recovered by cron,
+        // by the class report, or by anything except a teacher happening to press
+        // Re-analyse on this page again — and the page said the analysis had succeeded.
+        //
+        // 'error' is the truth, it is retryable everywhere, and the message says why.
+        $upd = new stdClass();
+        $upd->id           = $subid;
+        $upd->status       = 'error';
+        $upd->errormsg     = \core_text::substr('Re-analyse failed: ' . $e->getMessage(), 0, 250);
+        $upd->timemodified = time();
+        $DB->update_record('plagiarism_docguard_sub', $upd);
+        redirect(
+            $redirecturl,
+            get_string('reanalysefailed', 'plagiarism_docguard', $e->getMessage()),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
     }
 }
 
-$student = $DB->get_record('user', ['id' => $sub->userid], 'id,firstname,lastname,username,firstnamephonetic,lastnamephonetic,middlename,alternatename', IGNORE_MISSING);
-$fn      = $student ? fullname($student) : 'Unknown (#' . $sub->userid . ')';
+$student = $DB->get_record(
+    'user',
+    ['id' => $sub->userid],
+    'id,firstname,lastname,username,firstnamephonetic,lastnamephonetic,middlename,alternatename',
+    IGNORE_MISSING
+);
+$fn      = $student ? fullname($student) : get_string('unknownuser', 'plagiarism_docguard', $sub->userid);
 
 $PAGE->set_url(new moodle_url('/plagiarism/docguard/student_report.php', ['subid' => $subid]));
 $PAGE->set_context($context);
-$PAGE->set_title('DocGuard Report — ' . $fn);
-$PAGE->set_heading('DocGuard Student Report');
+$PAGE->set_title(get_string('studentreportheading', 'plagiarism_docguard', $fn));
+$PAGE->set_heading(get_string('studentreport', 'plagiarism_docguard'));
 $PAGE->requires->css('/plagiarism/docguard/styles.css');
 
 echo $OUTPUT->header();
 
-// ── Header panel ──────────────────────────────────────────────────────────────
+/* ── Header panel ────────────────────────────────────────────────────────────── */
 
 $level = $sub->overall_risklevel ?? 'low';
-$level_colours = [
+$levelcolours = [
     'high'   => ['#b71c1c', '#ffebee'],
     'medium' => ['#e65100', '#fff8e1'],
     'low'    => ['#2e7d32', '#e8f5e9'],
 ];
-[$lc, $lb] = $level_colours[$level] ?? ['#374151', '#f3f4f6'];
+[$lc, $lb] = $levelcolours[$level] ?? ['#374151', '#f3f4f6'];
 
 $course  = get_course($cm->course);
 $modinfo = get_fast_modinfo($cm->course);
 $actname = $modinfo->get_cm($cmid)->name;
 
-$class_url = new moodle_url('/plagiarism/docguard/report.php', ['cmid' => $cmid]);
+$classurl = new moodle_url('/plagiarism/docguard/report.php', ['cmid' => $cmid]);
 
-echo '<div class="docguard-report-header" style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem;">';
+echo '<div class="docguard-report-header" '
+    . 'style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:1rem;">';
 echo '<div>';
-echo '<h2 style="margin:0 0 0.25rem;">DocGuard Report &mdash; ' . s($fn) . '</h2>';
+echo '<h2 style="margin:0 0 0.25rem;">'
+    . get_string('studentreportheading', 'plagiarism_docguard', s($fn)) . '</h2>';
 echo '<p style="margin:0;opacity:0.8;font-size:0.9rem;">' . s($actname) . ' &nbsp;|&nbsp; ' . s($course->fullname) . '</p>';
-echo '<p style="margin:0.25rem 0 0;opacity:0.75;font-size:0.82rem;">File: ' . s($sub->filename) . ' (' . strtoupper($sub->filetype) . ') &nbsp; Analysed: ' . userdate($sub->timemodified, '%d %b %Y %H:%M') . '</p>';
+echo '<p style="margin:0.25rem 0 0;opacity:0.75;font-size:0.82rem;">'
+    . get_string('filelabel', 'plagiarism_docguard') . ': ' . s($sub->filename)
+    . ' (' . strtoupper($sub->filetype) . ') &nbsp; '
+    . get_string('colanalysed', 'plagiarism_docguard') . ': '
+    . userdate($sub->timemodified, '%d %b %Y %H:%M') . '</p>';
 echo '</div>';
 echo '<div style="display:flex;gap:0.5rem;align-items:flex-start;flex-wrap:wrap;">';
-$reanalyse_url = new moodle_url('/plagiarism/docguard/student_report.php', ['subid' => $subid, 'reanalyse' => 1, 'sesskey' => sesskey()]);
-echo '<a href="' . $reanalyse_url->out(false) . '" class="btn btn-outline-light btn-sm" style="align-self:flex-start;" onclick="return confirm(\'Re-run analysis using the latest PDF extractor? This will overwrite the current results.\');">&#8635; Re-analyse</a>';
-echo '<a href="' . $class_url->out(false) . '" class="btn btn-outline-light btn-sm" style="align-self:flex-start;">&#8592; Class Report</a>';
+$reanalyseurl = new moodle_url(
+    '/plagiarism/docguard/student_report.php',
+    ['subid' => $subid, 'reanalyse' => 1, 'sesskey' => sesskey()]
+);
+echo '<a href="' . $reanalyseurl->out(false) . '" class="btn btn-outline-light btn-sm" style="align-self:flex-start;"'
+    . ' onclick="return confirm(\'' . s(addslashes(get_string('reanalyseconfirm', 'plagiarism_docguard'))) . '\');">'
+    . '&#8635; ' . get_string('reanalysebutton', 'plagiarism_docguard') . '</a>';
+echo '<a href="' . $classurl->out(false) . '" class="btn btn-outline-light btn-sm" style="align-self:flex-start;">'
+    . '&#8592; ' . get_string('classreportshort', 'plagiarism_docguard') . '</a>';
 echo '</div>';
 echo '</div>';
 
-// ── Status check ──────────────────────────────────────────────────────────────
+/* ── Status check ────────────────────────────────────────────────────────────── */
 
 if ($sub->status === 'error') {
-    echo $OUTPUT->notification('Analysis error: ' . s($sub->errormsg), 'error');
+    echo $OUTPUT->notification(
+        get_string('analysiserror', 'plagiarism_docguard', s($sub->errormsg)),
+        'error'
+    );
     echo $OUTPUT->footer();
     exit;
 }
 if ($sub->status !== 'analysed') {
-    echo $OUTPUT->notification('This submission is still being analysed. Refresh the page in a moment.', 'info');
+    echo $OUTPUT->notification(get_string('stillanalysing', 'plagiarism_docguard'), 'info');
     echo $OUTPUT->footer();
     exit;
 }
 
-// ── Overall score card ────────────────────────────────────────────────────────
+/* ── Overall score card ──────────────────────────────────────────────────────── */
 
 $score = (float)$sub->overall_riskscore;
-$bar_w = (int)min(100, $score);
+$barw = (int)min(100, $score);
 
-echo '<div style="background:' . $lb . ';border:1px solid ' . $lc . '33;border-radius:8px;padding:1.25rem 1.5rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:2rem;flex-wrap:wrap;">';
+echo '<div style="background:' . $lb . ';border:1px solid ' . $lc . '33;border-radius:8px;padding:1.25rem '
+    . '1.5rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:2rem;flex-wrap:wrap;">';
 echo '<div style="text-align:center;">';
 echo '<div style="font-size:2.8rem;font-weight:800;color:' . $lc . ';">' . (int)$score . '</div>';
 echo '<div style="font-size:0.8rem;color:' . $lc . ';font-weight:600;">/ 100</div>';
 echo '</div>';
 echo '<div style="flex:1;min-width:200px;">';
-echo '<div style="font-size:1.2rem;font-weight:700;color:' . $lc . ';margin-bottom:0.25rem;">' . strtoupper($level) . ' RISK</div>';
+$dgriskbanners = [
+    'low'    => core_text::strtoupper(get_string('risklevelbannerlow', 'plagiarism_docguard')),
+    'medium' => core_text::strtoupper(get_string('risklevelbannermedium', 'plagiarism_docguard')),
+    'high'   => core_text::strtoupper(get_string('risklevelbannerhigh', 'plagiarism_docguard')),
+];
+$dgriskshort = [
+    'low'    => core_text::strtoupper(get_string('risklevelshortlow', 'plagiarism_docguard')),
+    'medium' => core_text::strtoupper(get_string('risklevelshortmedium', 'plagiarism_docguard')),
+    'high'   => core_text::strtoupper(get_string('risklevelshorthigh', 'plagiarism_docguard')),
+];
+echo '<div style="font-size:1.2rem;font-weight:700;color:' . $lc . ';margin-bottom:0.25rem;">'
+    . ($dgriskbanners[$level] ?? strtoupper($level) . ' RISK') . '</div>';
 echo '<div class="docguard-score-bar-wrap" style="width:100%;max-width:300px;">';
-echo '<span class="docguard-score-bar docguard-score-bar-' . s($level) . '" style="width:' . $bar_w . '%;"></span>';
+echo '<span class="docguard-score-bar docguard-score-bar-' . s($level) . '" style="width:' . $barw . '%;"></span>';
 echo '</div>';
 echo '<div style="font-size:0.83rem;color:#555;margin-top:0.4rem;">';
-echo (int)$sub->section_count . ' section(s) analysed &nbsp;|&nbsp; ';
-echo 'File: ' . s($sub->filename);
+echo get_string('sectionsanalysed', 'plagiarism_docguard', (int)$sub->section_count) . ' &nbsp;|&nbsp; ';
+echo get_string('filelabel', 'plagiarism_docguard') . ': ' . s($sub->filename);
 echo '</div>';
 echo '</div>';
 
 // Score legend.
 echo '<div style="font-size:0.8rem;color:#555;line-height:1.8;">';
-echo '<span style="color:#2e7d32;font-weight:600;">&#9679; LOW</span>: 0–34 &nbsp; ';
-echo '<span style="color:#e65100;font-weight:600;">&#9679; MEDIUM</span>: 35–64 &nbsp; ';
-echo '<span style="color:#b71c1c;font-weight:600;">&#9679; HIGH</span>: 65–100';
+echo '<span style="color:#2e7d32;font-weight:600;">&#9679; ' . $dgriskshort['low'] . '</span>: 0–34 &nbsp; ';
+echo '<span style="color:#e65100;font-weight:600;">&#9679; ' . $dgriskshort['medium'] . '</span>: 35–64 &nbsp; ';
+echo '<span style="color:#b71c1c;font-weight:600;">&#9679; ' . $dgriskshort['high'] . '</span>: 65–100';
 echo '</div>';
 echo '</div>';
 
-// ── Per-section breakdown ─────────────────────────────────────────────────────
+/* ── Per-section breakdown ───────────────────────────────────────────────────── */
 
 $sections = $DB->get_records('plagiarism_docguard_sec', ['subid' => $subid], 'section_num ASC');
 
@@ -184,50 +302,58 @@ if (empty($sections)) {
     // FIX-DG-EMPTY-BREAKDOWN-MSG (v1.0.78): "No section data available." gave the
     // teacher no idea whether this was a bug, a permissions problem or an empty
     // document. Explain it and point at the recovery action on this same page.
-    echo $OUTPUT->notification(
-        'No per-section breakdown is stored for this submission. The overall score above was '
-        . 'calculated, but the section detail was either never stored or has since been removed. '
-        . 'Use the Re-analyse button at the top of this page to rebuild it.',
-        'info'
-    );
+    echo $OUTPUT->notification(get_string('nosectionbreakdown', 'plagiarism_docguard'), 'info');
 } else {
-    echo '<h4 style="margin:0 0 1rem;">Per-Section Analysis</h4>';
+    echo '<h4 style="margin:0 0 1rem;">' . get_string('persectionheading', 'plagiarism_docguard') . '</h4>';
 
     foreach ($sections as $sec) {
         $sl    = $sec->risklevel ?? 'low';
-        [$slc, $slb] = $level_colours[$sl] ?? ['#374151', '#f3f4f6'];
+        [$slc, $slb] = $levelcolours[$sl] ?? ['#374151', '#f3f4f6'];
         $signals = json_decode((string)$sec->signalsjson, true) ?: [];
 
         // Build clean plain-text version of section_text for display.
-        $full_text = strip_tags(html_entity_decode((string)$sec->section_text, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
-        $full_text = trim(preg_replace('/\s+/', ' ', str_replace("\xc2\xa0", ' ', $full_text)));
-        $text_long = mb_strlen($full_text) > 600;
-        $text_short = $text_long ? mb_substr($full_text, 0, 600) : $full_text;
+        $fulltext = strip_tags(html_entity_decode((string)$sec->section_text, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+        $fulltext = trim(preg_replace('/\s+/', ' ', str_replace("\xc2\xa0", ' ', $fulltext)));
+        $textlong = mb_strlen($fulltext) > 600;
+        $textshort = $textlong ? mb_substr($fulltext, 0, 600) : $fulltext;
 
         echo '<div class="docguard-section-card">';
         echo '<div class="docguard-section-head">';
         echo '<span class="docguard-badge docguard-badge-' . s($sl) . '" style="margin:0;">'
             . '<span class="docguard-dot docguard-dot-' . s($sl) . '"></span>'
-            . strtoupper($sl) . '</span>';
+            . ($dgriskshort[$sl] ?? strtoupper($sl)) . '</span>';
         echo '<strong>' . s($sec->section_label) . '</strong>';
         echo '<span style="margin-left:auto;font-size:0.82rem;color:#6b7280;">'
             . (int)$sec->riskscore . '/100 &nbsp; '
-            . (int)$sec->wordcount . ' words</span>';
+            . get_string('wordcountlabel', 'plagiarism_docguard', (int)$sec->wordcount) . '</span>';
         echo '</div>';
         echo '<div class="docguard-section-body">';
 
-        if ($full_text) {
+        if ($fulltext) {
             $sid = 'dg-ans-' . (int)$sec->id;
             echo '<div style="margin-bottom:0.85rem;">';
-            echo '<div style="font-size:0.72rem;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.35rem;">Student\'s Answer</div>';
-            echo '<div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:6px;padding:0.75rem 1rem;font-size:0.88rem;color:#374151;line-height:1.65;">';
-            echo '<span id="' . $sid . '-short">' . s($text_short);
-            if ($text_long) {
-                echo '&hellip; <a href="#" onclick="document.getElementById(\'' . $sid . '-short\').style.display=\'none\';document.getElementById(\'' . $sid . '-full\').style.display=\'inline\';return false;" style="font-size:0.8rem;color:#6366f1;white-space:nowrap;">show more</a>';
+            echo '<div '
+                . 'style="font-size:0.72rem;font-weight:700;color:#9ca3af;text-transform:uppercase;'
+                . 'letter-spacing:0.06em;margin-bottom:0.35rem;">'
+                . get_string('studentanswer', 'plagiarism_docguard') . '</div>';
+            echo '<div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:6px;padding:0.75rem '
+                . '1rem;font-size:0.88rem;color:#374151;line-height:1.65;">';
+            echo '<span id="' . $sid . '-short">' . s($textshort);
+            if ($textlong) {
+                echo '&hellip; <a href="#" onclick="document.getElementById(\'' . $sid
+                    . '-short\').style.display=\'none\';document.getElementById(\'' . $sid
+                    . '-full\').style.display=\'inline\';return false;" '
+                    . 'style="font-size:0.8rem;color:#6366f1;white-space:nowrap;">'
+                    . get_string('showmore', 'plagiarism_docguard') . '</a>';
             }
             echo '</span>';
-            if ($text_long) {
-                echo '<span id="' . $sid . '-full" style="display:none;">' . s($full_text) . ' <a href="#" onclick="document.getElementById(\'' . $sid . '-full\').style.display=\'none\';document.getElementById(\'' . $sid . '-short\').style.display=\'inline\';return false;" style="font-size:0.8rem;color:#6366f1;white-space:nowrap;">show less</a></span>';
+            if ($textlong) {
+                echo '<span id="' . $sid . '-full" style="display:none;">' . s($fulltext)
+                    . ' <a href="#" onclick="document.getElementById(\'' . $sid
+                    . '-full\').style.display=\'none\';document.getElementById(\'' . $sid
+                    . '-short\').style.display=\'inline\';return false;" '
+                    . 'style="font-size:0.8rem;color:#6366f1;white-space:nowrap;">'
+                    . get_string('showless', 'plagiarism_docguard') . '</a></span>';
             }
             echo '</div>';
             echo '</div>';
@@ -235,21 +361,35 @@ if (empty($sections)) {
 
         if (!empty($signals)) {
             echo '<details style="font-size:0.82rem;margin-top:0.65rem;margin-bottom:0.4rem;">';
-            echo '<summary style="cursor:pointer;display:inline-flex;align-items:center;gap:0.4rem;padding:0.2rem 0.65rem;border-radius:5px;border:1px solid #e5e7eb;background:#f9fafb;color:#374151;font-weight:600;font-size:0.8rem;list-style:none;-webkit-appearance:none;">&#9432;&nbsp;Signal status key</summary>';
-            echo '<div style="margin-top:0.4rem;padding:0.65rem 0.9rem;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;max-width:600px;display:flex;flex-direction:column;gap:0.5rem;">';
+            echo '<summary style="cursor:pointer;display:inline-flex;align-items:center;gap:0.4rem;padding:0.2rem '
+                . '0.65rem;border-radius:5px;border:1px solid '
+                . '#e5e7eb;background:#f9fafb;color:#374151;font-weight:600;font-size:0.8rem;'
+                . 'list-style:none;-webkit-appearance:none;">&#9432;&nbsp;'
+                . get_string('signalstatuskey', 'plagiarism_docguard') . '</summary>';
+            echo '<div style="margin-top:0.4rem;padding:0.65rem 0.9rem;background:#f9fafb;border:1px solid '
+                . '#e5e7eb;border-radius:6px;max-width:600px;display:flex;flex-direction:column;gap:0.5rem;">';
             echo '<div style="display:flex;gap:0.65rem;align-items:baseline;">'
-                . '<span style="min-width:82px;font-size:0.8rem;font-weight:700;color:#991b1b;white-space:nowrap;flex-shrink:0;">&#9679;&nbsp;FIRED</span>'
-                . '<span style="font-size:0.82rem;color:#374151;">This signal detected a suspicious pattern. Its points were added to the section risk score.</span>'
+                . '<span style="min-width:82px;font-size:0.8rem;font-weight:700;color:#991b1b;white-space:nowrap;flex-shrink:0;">'
+                . '&#9679;&nbsp;' . core_text::strtoupper(get_string('signalfired', 'plagiarism_docguard')) . '</span>'
+                . '<span style="font-size:0.82rem;color:#374151;">'
+                . get_string('signalfireddesc', 'plagiarism_docguard') . '</span>'
                 . '</div>';
             echo '<div style="display:flex;gap:0.65rem;align-items:baseline;">'
-                . '<span style="min-width:82px;font-size:0.8rem;font-weight:600;color:#9ca3af;white-space:nowrap;flex-shrink:0;">&#9711;&nbsp;Silent</span>'
-                . '<span style="font-size:0.82rem;color:#374151;">This signal was evaluated but found nothing suspicious. No points were added.</span>'
+                . '<span style="min-width:82px;font-size:0.8rem;font-weight:600;color:#9ca3af;white-space:nowrap;flex-shrink:0;">'
+                . '&#9711;&nbsp;' . get_string('signalsilent', 'plagiarism_docguard') . '</span>'
+                . '<span style="font-size:0.82rem;color:#374151;">'
+                . get_string('signalsilentdesc', 'plagiarism_docguard') . '</span>'
                 . '</div>';
             echo '</div></details>';
             echo '<table class="docguard-signal-table" style="margin-top:0.5rem;">';
-            echo '<thead><tr><th>Signal</th><th>Status</th><th>Points</th><th style="min-width:220px;">Detail</th></tr></thead><tbody>';
+            echo '<thead><tr>'
+                . '<th>' . get_string('colsignal', 'plagiarism_docguard') . '</th>'
+                . '<th>' . get_string('colstatus', 'plagiarism_docguard') . '</th>'
+                . '<th>' . get_string('colpoints', 'plagiarism_docguard') . '</th>'
+                . '<th style="min-width:220px;">' . get_string('coldetail', 'plagiarism_docguard') . '</th>'
+                . '</tr></thead><tbody>';
 
-            $signal_order = [
+            $signalorder = [
                 's1_ai_markers', 's2_sentence_uniformity', 's3_ttr_uniformity',
                 's4_transitions', 's5_contractions', 's6_passive_voice',
                 's7_template', 's8_trigrams', 's9_sentence_starts',
@@ -257,73 +397,103 @@ if (empty($sections)) {
             ];
 
             $defined = array_merge(
-                array_intersect($signal_order, array_keys($signals)),
-                array_diff(array_keys($signals), $signal_order)
+                array_intersect($signalorder, array_keys($signals)),
+                array_diff(array_keys($signals), $signalorder)
             );
 
             foreach ($defined as $key) {
-                if (!isset($signals[$key])) { continue; }
+                if (!isset($signals[$key])) {
+                    continue;
+                }
                 $sig = $signals[$key];
                 $pts = (int)($sig['points'] ?? 0);
                 $max = (int)($sig['max'] ?? 0);
                 $lbl = $sig['label'] ?? $key;
-                $desc= $sig['description'] ?? '';
+                $desc = $sig['description'] ?? '';
                 $frd = !empty($sig['fired']);
 
-                $status_html = $frd
-                    ? '<span class="docguard-signal-fired" title="FIRED — This signal detected a suspicious pattern and its points were added to the risk score.">&#9679; FIRED</span>'
-                    : '<span class="docguard-signal-silent" title="Silent — This signal was evaluated but found nothing suspicious. No points were added.">&#9711; Silent</span>';
+                $statushtml = $frd
+                    ? '<span class="docguard-signal-fired" title="'
+                        . s(get_string('signalfiredtitle', 'plagiarism_docguard')) . '">&#9679; '
+                        . core_text::strtoupper(get_string('signalfired', 'plagiarism_docguard')) . '</span>'
+                    : '<span class="docguard-signal-silent" title="'
+                        . s(get_string('signalsilenttitle', 'plagiarism_docguard')) . '">&#9711; '
+                        . get_string('signalsilent', 'plagiarism_docguard') . '</span>';
 
-                $detail_parts = [];
+                $detailparts = [];
                 if (isset($sig['marker_count'])) {
-                    $detail_parts[] = 'Markers found: ' . $sig['marker_count'];
+                    $detailparts[] = get_string('detailmarkers', 'plagiarism_docguard', $sig['marker_count']);
                     if (!empty($sig['matches'])) {
-                        $detail_parts[] = '"' . implode('", "', array_slice($sig['matches'], 0, 5)) . '"';
+                        $detailparts[] = '"' . implode('", "', array_slice($sig['matches'], 0, 5)) . '"';
                     }
                 }
                 if (isset($sig['mean_words'])) {
-                    $detail_parts[] = 'Mean sentence: ' . $sig['mean_words'] . ' words';
+                    $detailparts[] = get_string('detailmeansentence', 'plagiarism_docguard', $sig['mean_words']);
                 }
                 if (isset($sig['std_dev']) && $sig['std_dev'] !== null) {
-                    $detail_parts[] = 'Std dev: ' . $sig['std_dev'];
+                    $detailparts[] = get_string('detailstddev', 'plagiarism_docguard', $sig['std_dev']);
                 }
                 if (isset($sig['ttr_std_dev']) && $sig['ttr_std_dev'] !== null) {
-                    $detail_parts[] = 'TTR std dev: ' . $sig['ttr_std_dev'];
+                    $detailparts[] = get_string('detailttrstddev', 'plagiarism_docguard', $sig['ttr_std_dev']);
                 }
                 if (isset($sig['per_100'])) {
-                    $detail_parts[] = 'Per 100 words: ' . $sig['per_100'];
+                    $detailparts[] = get_string('detailper100', 'plagiarism_docguard', $sig['per_100']);
                     if (!empty($sig['hits'])) {
-                        $detail_parts[] = implode(', ', array_slice($sig['hits'], 0, 5));
+                        $detailparts[] = implode(', ', array_slice($sig['hits'], 0, 5));
                     }
                 }
                 if (isset($sig['passive_count'])) {
-                    $detail_parts[] = 'Passive constructs: ' . $sig['passive_count'] . ' (ratio: ' . $sig['ratio'] . ')';
+                    $detailparts[] = get_string(
+                        'detailpassive',
+                        'plagiarism_docguard',
+                        (object) ['count' => $sig['passive_count'], 'ratio' => $sig['ratio']]
+                    );
                 }
                 if (isset($sig['opener_found'])) {
-                    $detail_parts[] = 'Opener: ' . ($sig['opener_found'] ? '"' . $sig['opener_hit'] . '"' : 'none');
-                    $detail_parts[] = 'Closer: ' . ($sig['closer_found'] ? '"' . $sig['closer_hit'] . '"' : 'none');
+                    $detailparts[] = get_string(
+                        'detailopener',
+                        'plagiarism_docguard',
+                        $sig['opener_found']
+                            ? '"' . $sig['opener_hit'] . '"'
+                        : get_string('detailnone', 'plagiarism_docguard')
+                    );
+                    $detailparts[] = get_string(
+                        'detailcloser',
+                        'plagiarism_docguard',
+                        $sig['closer_found']
+                            ? '"' . $sig['closer_hit'] . '"'
+                        : get_string('detailnone', 'plagiarism_docguard')
+                    );
                 }
                 if (isset($sig['unique_ratio']) && $sig['unique_ratio'] !== null) {
-                    $detail_parts[] = 'Trigram uniqueness: ' . round($sig['unique_ratio'] * 100) . '%';
+                    $detailparts[] = get_string(
+                        'detailtrigram',
+                        'plagiarism_docguard',
+                        round($sig['unique_ratio'] * 100)
+                    );
                 }
                 if (isset($sig['uniform_ratio']) && $sig['uniform_ratio'] !== null) {
-                    $detail_parts[] = 'Uniform starts: ' . round($sig['uniform_ratio'] * 100) . '% of sentences';
+                    $detailparts[] = get_string(
+                        'detailuniformstarts',
+                        'plagiarism_docguard',
+                        round($sig['uniform_ratio'] * 100)
+                    );
                 }
                 if (isset($sig['ttr'])) {
-                    $detail_parts[] = 'TTR: ' . $sig['ttr'];
+                    $detailparts[] = get_string('detailttr', 'plagiarism_docguard', $sig['ttr']);
                 }
                 if (isset($sig['note'])) {
-                    $detail_parts[] = $sig['note'];
+                    $detailparts[] = $sig['note'];
                 }
 
-                $detail_html = implode('<br>', array_map('s', $detail_parts));
+                $detailhtml = implode('<br>', array_map('s', $detailparts));
                 if ($desc) {
-                    $detail_html .= '<div style="margin-top:3px;color:#9ca3af;font-size:0.78rem;">' . s($desc) . '</div>';
+                    $detailhtml .= '<div style="margin-top:3px;color:#9ca3af;font-size:0.78rem;">' . s($desc) . '</div>';
                 }
 
                 echo '<tr>';
                 echo '<td class="' . ($frd ? 'docguard-signal-fired' : 'docguard-signal-silent') . '">' . s($lbl) . '</td>';
-                echo '<td>' . $status_html . '</td>';
+                echo '<td>' . $statushtml . '</td>';
                 echo '<td>';
                 if ($frd) {
                     echo '<strong>' . $pts . '</strong> / ' . $max;
@@ -331,7 +501,7 @@ if (empty($sections)) {
                     echo '0 / ' . $max;
                 }
                 echo '</td>';
-                echo '<td>' . $detail_html . '</td>';
+                echo '<td>' . $detailhtml . '</td>';
                 echo '</tr>';
             }
             echo '</tbody></table>';
@@ -341,61 +511,84 @@ if (empty($sections)) {
             // records the reason as a section-level 'insufficient_text' note that was
             // never rendered anywhere. State the reason instead of showing a blank card.
             echo '<p style="color:#9ca3af;font-style:italic;font-size:0.85rem;">'
-                . 'No signals were evaluated for this section — fewer than 8 words were recognised in it. '
-                . 'This is expected for headings and very short answers, and can also mean the text '
-                . 'did not extract cleanly from the original file.</p>';
+                . get_string('nosignals', 'plagiarism_docguard') . '</p>';
         }
 
         echo '</div></div>';
     }
 }
 
-// ── Cross-student similarity ──────────────────────────────────────────────────
+/* ── Cross-student similarity ────────────────────────────────────────────────── */
 
-echo '<h4 style="margin:2rem 0 0.75rem;">Cross-Student Similarity (S12)</h4>';
+echo '<h4 style="margin:2rem 0 0.75rem;">'
+    . get_string('crosssimilarityheading', 'plagiarism_docguard') . '</h4>';
 echo '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:0.85rem 1.1rem;margin-bottom:1rem;">';
-echo '<div style="font-weight:700;color:#92400e;font-size:0.93rem;margin-bottom:0.3rem;">Has this student copied from another student in this class?</div>';
-echo '<div style="font-size:0.83rem;color:#78350f;line-height:1.55;">DocGuard scans every other student\'s submission for this same activity and measures how much of the text they have in common. A high similarity score means two students\' documents contain large amounts of matching content — this may indicate copying, shared notes, or use of the same source material. Each student\'s report also links to the other for easy side-by-side comparison.</div>';
+echo '<div style="font-weight:700;color:#92400e;font-size:0.93rem;margin-bottom:0.3rem;">'
+    . get_string('crosscopyquestion', 'plagiarism_docguard') . '</div>';
+echo '<div style="font-size:0.83rem;color:#78350f;line-height:1.55;">'
+    . get_string('crosscopydesc', 'plagiarism_docguard') . '</div>';
 echo '</div>';
-echo '<p style="font-size:0.8rem;color:#9ca3af;margin-bottom:0.75rem;">Method: Jaccard bigram similarity on normalised submission text. Matches flagged at &ge;30% similarity.</p>';
+echo '<p style="font-size:0.8rem;color:#9ca3af;margin-bottom:0.75rem;">'
+    . get_string('crossmethod', 'plagiarism_docguard') . '</p>';
 
 if (strlen((string)$sub->normtext) > 100) {
     $similar = \plagiarism_docguard\analyser::cross_student_similarity(
-        $subid, $cmid, (string)$sub->normtext
+        $subid,
+        $cmid,
+        (string)$sub->normtext
     );
 
+    // V1.0.80: never name a student this viewer is not permitted to see (separate groups).
+    if ($dgallowedids !== null) {
+        $similar = array_values(
+            array_filter(
+                $similar,
+                fn($m) => isset($dgallowedids[(int)$m['userid']])
+                )
+        );
+    }
+
     if (empty($similar)) {
-        echo '<p style="color:#6b7280;font-style:italic;">No significant similarities detected (threshold: &ge;30% Jaccard).</p>';
+        echo '<p style="color:#6b7280;font-style:italic;">'
+            . get_string('nosimilaritiesthreshold', 'plagiarism_docguard') . '</p>';
     } else {
         echo '<table class="docguard-similarity-table">';
-        echo '<thead><tr><th>Student</th><th>Similarity</th><th>Their Risk Level</th><th>Their Report</th></tr></thead><tbody>';
+        echo '<thead><tr>'
+            . '<th>' . get_string('colstudent', 'plagiarism_docguard') . '</th>'
+            . '<th>' . get_string('colsimilarity', 'plagiarism_docguard') . '</th>'
+            . '<th>' . get_string('coltheirrisk', 'plagiarism_docguard') . '</th>'
+            . '<th>' . get_string('coltheirreport', 'plagiarism_docguard') . '</th>'
+            . '</tr></thead><tbody>';
         foreach ($similar as $match) {
-            $sim_pct = round($match['similarity'] * 100);
+            $simpct = round($match['similarity'] * 100);
             $col     = $match['similarity'] >= 0.70 ? '#b71c1c' : ($match['similarity'] >= 0.50 ? '#e65100' : '#374151');
             $rurl    = new moodle_url('/plagiarism/docguard/student_report.php', ['subid' => $match['subid']]);
             echo '<tr>';
             echo '<td>' . s($match['fullname']) . ' <small style="color:#9ca3af;">(' . s($match['username']) . ')</small></td>';
-            echo '<td style="font-weight:700;color:' . $col . ';">' . $sim_pct . '%</td>';
+            echo '<td style="font-weight:700;color:' . $col . ';">' . $simpct . '%</td>';
             echo '<td><span class="docguard-badge docguard-badge-' . s($match['risklevel']) . '" style="display:inline-flex;">'
-                . strtoupper($match['risklevel']) . '</span></td>';
-            echo '<td><a href="' . $rurl->out(false) . '">View</a></td>';
+                . ($dgriskshort[$match['risklevel']] ?? strtoupper($match['risklevel'])) . '</span></td>';
+            echo '<td><a href="' . $rurl->out(false) . '">'
+                . get_string('viewword', 'plagiarism_docguard') . '</a></td>';
             echo '</tr>';
         }
         echo '</tbody></table>';
     }
 } else {
-    echo '<p style="color:#9ca3af;font-style:italic;">Insufficient text extracted for similarity comparison.</p>';
+    echo '<p style="color:#9ca3af;font-style:italic;">'
+        . get_string('insufficienttext', 'plagiarism_docguard') . '</p>';
 }
 
-// ── Interpretation guide ──────────────────────────────────────────────────────
+/* ── Interpretation guide ────────────────────────────────────────────────────── */
 
-echo '<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:1rem 1.25rem;margin-top:2rem;font-size:0.83rem;">';
-echo '<strong>Interpretation Guide</strong><br>';
+echo '<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:1rem '
+    . '1.25rem;margin-top:2rem;font-size:0.83rem;">';
+echo '<strong>' . get_string('interpretationguide', 'plagiarism_docguard') . '</strong><br>';
 echo '<ul style="margin:0.5rem 0 0;padding-left:1.25rem;color:#555;">';
-echo '<li><strong>LOW (0–34):</strong> Submission appears consistent with authentic student writing. No major concerns detected.</li>';
-echo '<li><strong>MEDIUM (35–64):</strong> Some indicators present. Human review recommended — contextual factors may explain results.</li>';
-echo '<li><strong>HIGH (65–100):</strong> Multiple strong indicators of AI-generated content or plagiarism. Treat as a priority for review.</li>';
-echo '<li>DocGuard uses heuristic signals — it does not make definitive plagiarism determinations. Always apply academic judgement.</li>';
+echo '<li>' . get_string('interpretlow', 'plagiarism_docguard') . '</li>';
+echo '<li>' . get_string('interpretmedium', 'plagiarism_docguard') . '</li>';
+echo '<li>' . get_string('interprethigh', 'plagiarism_docguard') . '</li>';
+echo '<li>' . get_string('interpretnote', 'plagiarism_docguard') . '</li>';
 echo '</ul>';
 echo '</div>';
 

@@ -19,19 +19,19 @@
  *
  * @package    plagiarism_docguard
  * @copyright  2026 LMS-Labs
- * @license    http://www.gnu.org/licenses/gpl-3.0.html GNU GPL v3 or later
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
 // FIX-DG-STUCK-PENDING (v1.0.71) + FIX-DG-REANALYSE-ALWAYS (v1.0.72):
 // Inline re-analyse endpoint. Handles two cases:
 //
-//   Case B — DB record exists (subid provided): reset status to pending,
-//            clear old section rows, re-run full analysis pipeline.
+// Case B — DB record exists (subid provided): reset status to pending,
+// clear old section rows, re-run full analysis pipeline.
 //
-//   Case A — No DB record (fileid + userid provided): file was submitted
-//            before DocGuard was active on this activity; observer never fired.
-//            Find the file, resolve the assign submission ID, then call
-//            analyse_and_store() which creates the record and runs analysis.
+// Case A — No DB record (fileid + userid provided): file was submitted
+// before DocGuard was active on this activity; observer never fired.
+// Find the file, resolve the assign submission ID, then call
+// analyse_and_store() which creates the record and runs analysis.
 //
 // FIX-DG-REPORT-ACCESS (v1.0.78): gated by the same check that renders the badge
 // and guards the two report pages — plagiarism_docguard_can_view_reports().
@@ -49,10 +49,10 @@ require_once($CFG->dirroot . '/plagiarism/docguard/classes/observer.php');
 require_once($CFG->dirroot . '/plagiarism/docguard/classes/analyser.php');
 require_once($CFG->dirroot . '/plagiarism/docguard/classes/extractor.php');
 
-$subid    = optional_param('subid',   0, PARAM_INT);
-$fileid   = optional_param('fileid',  0, PARAM_INT);
-$puserid  = optional_param('userid',  0, PARAM_INT);
-$cmid     = required_param('cmid',    PARAM_INT);
+$subid    = optional_param('subid', 0, PARAM_INT);
+$fileid   = optional_param('fileid', 0, PARAM_INT);
+$puserid  = optional_param('userid', 0, PARAM_INT);
+$cmid     = required_param('cmid', PARAM_INT);
 
 require_sesskey();
 
@@ -63,28 +63,88 @@ if (!plagiarism_docguard_can_view_reports($context)) {
     require_capability('plagiarism/docguard:viewreport', $context);
 }
 
-$redirect_url = new moodle_url('/mod/assign/view.php', ['id' => $cmid, 'action' => 'grading']);
+$redirecturl = new moodle_url('/mod/assign/view.php', ['id' => $cmid, 'action' => 'grading']);
 
-// ── Case B: DB record exists — reset + re-analyse ────────────────────────────
+// V1.0.80: this endpoint extracts and stores student document text, so it honours the
+// site-wide switch and the per-activity opt-out like every other entry point. Without
+// this check a teacher could re-analyse — and therefore store text for — an activity
+// whose DocGuard checkbox they had just unticked, or a site whose administrator had
+// switched the plugin off entirely.
+if (!plagiarism_docguard_is_enabled()) {
+    redirect(
+        $redirecturl,
+        get_string('reanalysedisabledglobal', 'plagiarism_docguard'),
+        null,
+        \core\output\notification::NOTIFY_ERROR
+    );
+}
+if (!plagiarism_docguard_is_cm_active($cmid)) {
+    redirect(
+        $redirecturl,
+        get_string('reanalysedisabledcm', 'plagiarism_docguard'),
+        null,
+        \core\output\notification::NOTIFY_ERROR
+    );
+}
+// V1.0.88 FIX-DG-MANUAL-PATHS-UNLICENSED: and the licence gate, which this endpoint had
+// never applied even though the observer, the cron backfill and the scan_activity task
+// all do. See plagiarism_docguard_has_credentials() in lib.php for why the credentials
+// are tested here rather than calling check_unlock() on a web request.
+if (!plagiarism_docguard_has_credentials()) {
+    redirect(
+        $redirecturl,
+        get_string('reanalyseunlicensed', 'plagiarism_docguard'),
+        null,
+        \core\output\notification::NOTIFY_ERROR
+    );
+}
+
+/* ── Case B: DB record exists — reset + re-analyse ──────────────────────────── */
 if ($subid) {
     $sub = $DB->get_record('plagiarism_docguard_sub', ['id' => $subid, 'cmid' => $cmid], '*', MUST_EXIST);
 
+    // V1.0.84 FIX-DG-REANALYSE-GROUPS: report.php and student_report.php were both
+    // hardened for SEPARATEGROUPS in v1.0.80/v1.0.81; this entry point was missed. It
+    // checked only can_view_reports() and that the record's cmid matched, so a teacher
+    // restricted to one group could post a subid belonging to another group and trigger
+    // re-extraction and re-storage of that student's document text. Lower severity than
+    // a direct read - the redirect goes back to the grading page rather than showing the
+    // report - but it is a write against a submission the caller may not view, and the
+    // same restriction belongs on every door into the same data.
+    //
+    // V1.0.88: the check itself now lives in plagiarism_docguard_user_visible() in
+    // lib.php, shared with report.php and student_report.php. It had been written out by
+    // hand three times, and the fourth door — report.php's "Analyse" action — was missed
+    // every time.
+    if (!plagiarism_docguard_user_visible($cm, $context, (int)$sub->userid)) {
+        throw new \moodle_exception(
+            'nopermissions',
+            'error',
+            '',
+            get_string('reanalysebutton', 'plagiarism_docguard')
+        );
+    }
+
     // Locate the stored_file via the contenthash in the DB record.
-    $filerecord = $DB->get_record_sql(
-        'SELECT id FROM {files} WHERE contenthash = ? AND filename != ? ORDER BY id DESC LIMIT 1',
-        [$sub->contenthash, '.']
-    );
-    if (!$filerecord) {
-        redirect($redirect_url,
-            'Re-analyse failed: the original file no longer exists in Moodle file storage. The student may need to resubmit.',
-            null, \core\output\notification::NOTIFY_ERROR);
+    // v1.0.80: shared helper instead of a raw "LIMIT 1" — see lib.php.
+    $fileidbyhash = plagiarism_docguard_find_file_id_by_hash((string)$sub->contenthash);
+    if (!$fileidbyhash) {
+        redirect(
+            $redirecturl,
+            get_string('reanalysefailednostored', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
     }
     $fs   = get_file_storage();
-    $file = $fs->get_file_by_id($filerecord->id);
+    $file = $fs->get_file_by_id($fileidbyhash);
     if (!$file || $file->is_directory()) {
-        redirect($redirect_url,
-            'Re-analyse failed: could not retrieve the file from Moodle storage.',
-            null, \core\output\notification::NOTIFY_ERROR);
+        redirect(
+            $redirecturl,
+            get_string('reanalysefailedretrieve', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
     }
 
     // Reset to pending and wipe old section data.
@@ -105,30 +165,39 @@ if ($subid) {
             (int)$sub->submissionid,
             (int)$sub->contextid
         );
-        redirect($redirect_url,
-            'DocGuard re-analysis complete. Reload the page to see the updated result.',
-            null, \core\output\notification::NOTIFY_SUCCESS);
+        redirect(
+            $redirecturl,
+            get_string('reanalysecompletereload', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_SUCCESS
+        );
     } catch (\Throwable $e) {
-        redirect($redirect_url,
-            'Re-analyse failed: ' . $e->getMessage(),
-            null, \core\output\notification::NOTIFY_ERROR);
+        redirect(
+            $redirecturl,
+            get_string('reanalysefailed', 'plagiarism_docguard', $e->getMessage()),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
     }
 }
 
-// ── Case A: No DB record — find file by ID, create record + analyse ───────────
+/* ── Case A: No DB record — find file by ID, create record + analyse ─────────── */
 if ($fileid && $puserid) {
     $fs   = get_file_storage();
     $file = $fs->get_file_by_id($fileid);
     if (!$file || $file->is_directory()) {
-        redirect($redirect_url,
-            'Re-analyse failed: could not find the file (ID ' . $fileid . ') in Moodle storage.',
-            null, \core\output\notification::NOTIFY_ERROR);
+        redirect(
+            $redirecturl,
+            get_string('reanalysefailednofileid', 'plagiarism_docguard', $fileid),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
     }
 
     // FIX-DG-REANALYSE-FILE-SCOPE (v1.0.78): actually perform the check this comment
     // has always claimed to perform.
     //
-    // Previously $expected_contextid was merely ASSIGNED from $context->id and never
+    // Previously $expectedcontextid was merely ASSIGNED from $context->id and never
     // compared against the file — while $fileid and $userid arrive straight from the
     // query string as unvalidated PARAM_INT. get_file_by_id() will return ANY file in
     // the Moodle filestore, so a user who could reach this page could pass any file
@@ -139,12 +208,20 @@ if ($fileid && $puserid) {
     // then surface in that person's GDPR export.
     //
     // The file must live in THIS activity's context and be a student submission file.
-    if ((int)$file->get_contextid() !== (int)$context->id
+    if (
+        (int)$file->get_contextid() !== (int)$context->id
             || $file->get_component() !== 'assignsubmission_file'
-            || !in_array($file->get_filearea(), ['submission_files', 'draft'], true)) {
-        redirect($redirect_url,
-            'Re-analyse failed: that file does not belong to this assignment.',
-            null, \core\output\notification::NOTIFY_ERROR);
+            // V1.0.84: 'draft' removed. Draft files live in the USER context, so the
+            // contextid test on the line above already rejects every one of them - the
+            // entry was unreachable and wrongly suggested drafts are accepted here.
+            || $file->get_filearea() !== 'submission_files'
+    ) {
+        redirect(
+            $redirecturl,
+            get_string('reanalysefailedfilescope', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
     }
 
     // Resolve the assign submission ID for this student.
@@ -157,12 +234,15 @@ if ($fileid && $puserid) {
     // the analysis record — including the full extracted document text — could be
     // filed against an arbitrary account.
     if (!$asub) {
-        redirect($redirect_url,
-            'Re-analyse failed: that user has no submission in this assignment.',
-            null, \core\output\notification::NOTIFY_ERROR);
+        redirect(
+            $redirecturl,
+            get_string('reanalysefailednosubmission', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
     }
     $submissionid       = (int)$asub->id;
-    $expected_contextid = $context->id;
+    $expectedcontextid = $context->id;
 
     try {
         \plagiarism_docguard\observer::analyse_and_store(
@@ -170,17 +250,28 @@ if ($fileid && $puserid) {
             $cmid,
             $puserid,
             $submissionid,
-            $expected_contextid
+            $expectedcontextid
         );
-        redirect($redirect_url,
-            'DocGuard analysis complete. Reload the page to see the result.',
-            null, \core\output\notification::NOTIFY_SUCCESS);
+        redirect(
+            $redirecturl,
+            get_string('analysiscomplete', 'plagiarism_docguard'),
+            null,
+            \core\output\notification::NOTIFY_SUCCESS
+        );
     } catch (\Throwable $e) {
-        redirect($redirect_url,
-            'Analysis failed: ' . $e->getMessage(),
-            null, \core\output\notification::NOTIFY_ERROR);
+        redirect(
+            $redirecturl,
+            get_string('analysisfailed', 'plagiarism_docguard', $e->getMessage()),
+            null,
+            \core\output\notification::NOTIFY_ERROR
+        );
     }
 }
 
 // Neither subid nor fileid+userid provided.
-redirect($redirect_url, 'Invalid re-analyse request.', null, \core\output\notification::NOTIFY_ERROR);
+redirect(
+    $redirecturl,
+    get_string('reanalyseinvalid', 'plagiarism_docguard'),
+    null,
+    \core\output\notification::NOTIFY_ERROR
+);

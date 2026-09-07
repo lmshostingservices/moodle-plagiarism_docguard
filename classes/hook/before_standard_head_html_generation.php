@@ -16,8 +16,6 @@
 
 namespace plagiarism_docguard\hook;
 
-defined('MOODLE_INTERNAL') || die();
-
 /**
  * Hook callback for core\hook\output\before_standard_head_html_generation.
  *
@@ -36,14 +34,17 @@ defined('MOODLE_INTERNAL') || die();
  * purely for the pre-load side-effect.
  *
  * @package    plagiarism_docguard
- * @copyright  2026 EssayGraderAI
+ * @copyright  2026 LMS-Labs
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class before_standard_head_html_generation {
     /**
      * Pre-load plagiarismlib.php so lib.php is always included in Path B context.
      *
-     * @param \core\hook\output\before_standard_head_html_generation $hook
+     * @param \core\hook\output\before_standard_head_html_generation $hook The dispatched
+     *              hook instance. DocGuard adds nothing to the page head, so it is not read;
+     *              the parameter is required by the hook callback signature.
+     * @return void The callback's whole effect is the two require_once() side-effects.
      */
     public static function callback(
         \core\hook\output\before_standard_head_html_generation $hook

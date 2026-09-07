@@ -32,19 +32,61 @@ require_once(__DIR__ . '/../lib.php');
  * Fires when a student submits an assignment and triggers document analysis.
  * @package    plagiarism_docguard
  * @copyright  2026 LMS-Labs
- * @license    http://www.gnu.org/licenses/gpl-3.0.html GNU GPL v3 or later
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class observer {
     /**
      * Called when a student submits (or resubmits) an assignment.
      * Locates the submitted PDF/DOCX files and triggers analysis.
+     *
+     * @param \mod_assign\event\assessable_submitted $event The submission event.
+     * @return void
      */
     public static function on_assessable_submitted(\mod_assign\event\assessable_submitted $event): void {
         global $DB;
 
-        $cmid         = (int)$event->contextinstanceid;
-        $userid       = (int)$event->userid;
-        $submissionid = (int)($event->other['submissionid'] ?? 0);
+        $cmid = (int)$event->contextinstanceid;
+
+        /*
+         * V1.0.88 FIX-DG-OBSERVER-NEVER-FIRED: this read the submission id from
+         * $event->other['submissionid'], a key mod_assign has never set.
+         *
+         * assessable_submitted::create_from_submission() (mod/assign/classes/event/
+         * assessable_submitted.php) builds its payload as:
+         *     'objectid' => $submission->id,
+         *     'other'    => ['submission_editable' => $editable],
+         * and nothing else. So ['submissionid'] was always null, $submissionid was always
+         * 0, and get_area_files() below searched itemid 0 - which holds no submission
+         * files. Every student submission therefore stored NOTHING and sat on the grey
+         * "Plagiarism Check Pending" badge for ever.
+         *
+         * Nor did anything recover it: process_pending Phase 1 only retries records that
+         * already exist with status 'pending', and no record was ever created. The only
+         * paths that worked were the opt-in historical backfill and the teacher pressing
+         * Scan or Re-analyse by hand - which is exactly the behaviour observed on a live
+         * site, where submissions stayed Pending until re-analysed manually.
+         *
+         * The submission id is in objectid, where core puts it.
+         */
+        $submissionid = (int)$event->objectid;
+
+        /*
+         * V1.0.88 FIX-DG-OBSERVER-WRONG-USER: $event->userid is the person who performed
+         * the action, not necessarily the author. When a teacher submits on a student's
+         * behalf core sets userid = teacher and relateduserid = student (see the
+         * create_from_submission() branch that adds relateduserid when
+         * $submission->userid !== $USER->id).
+         *
+         * Filing the work under the submitter meant the student's extracted document text
+         * was stored against the teacher's user id: the student's badge stayed Pending,
+         * the teacher acquired a record for work they did not write, and - because
+         * privacy\provider keys on userid - the student's GDPR export and erasure request
+         * both missed the record entirely.
+         *
+         * relateduserid is set only when the two differ, so falling back to userid is
+         * correct for an ordinary self-submission.
+         */
+        $userid = (int)($event->relateduserid ?: $event->userid);
 
         // FIX-DG-OBSERVER-NAMESPACE (v1.0.11): observer.php is in namespace
         // plagiarism_docguard. PHP does NOT fall back to the global namespace for
@@ -85,7 +127,96 @@ class observer {
     }
 
     /**
+     * Called when an activity is deleted: remove the DocGuard records that belonged to it.
+     *
+     * V1.0.88 FIX-DG-ORPHAN-ON-DELETE.
+     *
+     * DocGuard observed no deletion event at all, so deleting an assignment left every
+     * plagiarism_docguard_sub row — including normtext, the complete extracted text of the
+     * student's document — and every plagiarism_docguard_sec row, holding up to 65,000
+     * characters of the student's verbatim answer per section, in the database for ever.
+     *
+     * That is not merely untidy, it is unreachable. Both privacy paths key on contextid,
+     * and course/lib.php::course_delete_module() calls
+     * context_helper::delete_instance(CONTEXT_MODULE, …) BEFORE it triggers this event, so
+     * the stored contextid names a {context} row that no longer exists.
+     * core_privacy's contextlist_base::get_contexts() wraps context::instance_by_id() in a
+     * try/catch and silently DROPS any context it cannot instantiate, so from the moment
+     * the activity is deleted:
+     *   - get_contexts_for_userid() returns an id that resolves to nothing, therefore the
+     *     data never appears in a subject access export;
+     *   - the approved contextlist built from it is empty, therefore an erasure request
+     *     deletes nothing and reports success;
+     *   - delete_data_for_all_users_in_context() is never called for a context that has
+     *     ceased to exist.
+     * The one deletion route that stays open is the site administrator running SQL by
+     * hand, which is not a GDPR compliance position.
+     *
+     * Reading the record's own cmid rather than its contextid deliberately: the context is
+     * already gone by the time this runs, and cmid is what both tables actually store.
+     *
+     * Course deletion does NOT come through here — lib/moodlelib.php::remove_course_contents()
+     * deletes each module context and course_modules row directly and triggers no
+     * course_module_deleted event — so the cleanup task additionally sweeps rows whose cmid
+     * no longer exists. See task/cleanup.php::purge_orphans().
+     *
+     * @param \core\event\course_module_deleted $event The deletion event.
+     * @return void
+     */
+    public static function on_course_module_deleted(\core\event\course_module_deleted $event): void {
+        self::purge_records_for_cm((int)$event->objectid);
+    }
+
+    /**
+     * Delete every DocGuard record belonging to one course module, and its config key.
+     *
+     * Shared by the deletion observer and the cleanup task's orphan sweep so the two can
+     * never disagree about what "belongs to" an activity.
+     *
+     * The per-activity enabled_cm_<cmid> value goes too. Course module ids are never
+     * reused by Moodle, so a surviving key can only ever be dead weight in {config_plugins};
+     * on a long-lived site that is one abandoned row per assignment ever deleted, and it is
+     * the key the backfill phase enumerates to build its candidate activity list.
+     *
+     * @param int $cmid The course module whose records should be removed.
+     * @return int The number of plagiarism_docguard_sub records deleted.
+     */
+    public static function purge_records_for_cm(int $cmid): int {
+        global $DB;
+
+        if ($cmid <= 0) {
+            return 0;
+        }
+
+        $subids = $DB->get_fieldset_select('plagiarism_docguard_sub', 'id', 'cmid = :cmid', ['cmid' => $cmid]);
+        if ($subids) {
+            [$in, $params] = $DB->get_in_or_equal($subids, SQL_PARAMS_NAMED);
+            $DB->delete_records_select('plagiarism_docguard_sec', "subid $in", $params);
+        }
+        // Section rows are also keyed on cmid in their own right, so a row whose parent
+        // record has already gone (an interrupted earlier delete, a hand-run cleanup) is
+        // still removed rather than being left behind holding the student's answer text.
+        $DB->delete_records('plagiarism_docguard_sec', ['cmid' => $cmid]);
+        $DB->delete_records('plagiarism_docguard_sub', ['cmid' => $cmid]);
+
+        if (get_config('plagiarism_docguard', 'enabled_cm_' . $cmid) !== false) {
+            unset_config('enabled_cm_' . $cmid, 'plagiarism_docguard');
+        }
+
+        return count($subids);
+    }
+
+    /**
      * Run analysis on one file and persist results.
+     *
+     * @param \stored_file $file The submitted document to analyse.
+     * @param int $cmid The course module the submission belongs to.
+     * @param int $userid The student who submitted it.
+     * @param int $submissionid The assign_submission id, or 0 when unknown.
+     * @param int $contextid The module context id.
+     * @return void
+     * @throws \Throwable Propagated from extraction or scoring, so callers can record
+     *                    an "error" status rather than a false "analysed" one.
      */
     public static function analyse_and_store(
         \stored_file $file,
@@ -96,15 +227,62 @@ class observer {
     ): void {
         global $DB;
 
+        // V1.0.80: last line of defence for the site-wide and per-activity switches.
+        // Every caller checks them, but this is the one function that writes extracted
+        // document text to the database, so it verifies for itself rather than trusting
+        // five separate call sites to have got it right — including any added later.
+        if (!\plagiarism_docguard_is_enabled() || !\plagiarism_docguard_is_cm_active($cmid)) {
+            \debugging(
+                'DocGuard: analyse_and_store() called for cmid ' . $cmid
+                    . ' while DocGuard is disabled — refusing to process.',
+                DEBUG_DEVELOPER
+            );
+            return;
+        }
+
         $contenthash = $file->get_contenthash();
         $filetype    = extractor::filetype($file);
 
         // Check for existing record by contenthash + cmid + userid.
-        $existing = $DB->get_record('plagiarism_docguard_sub', [
-            'userid'      => $userid,
-            'cmid'        => $cmid,
-            'contenthash' => $contenthash,
-        ]);
+        //
+        // v1.0.80: get_recordS, not get_record.
+        //
+        // get_record() throws dml_multiple_records_exception the moment two rows match,
+        // and NOTHING guaranteed uniqueness on (userid, cmid, contenthash): db/install.xml
+        // declares userid_cmid_ix and contenthash_ix as ordinary non-unique indexes, and
+        // the insert path below has no locking. Duplicates are not hypothetical — two
+        // teachers pressing Analyse at once, cron running while a teacher presses it, or
+        // the observer firing on a resubmission of the same file, all race between this
+        // read and the insert. From then on EVERY future call for that student threw, so
+        // the submission could never be analysed again by any route: badge, report,
+        // re-analyse, or cron.
+        //
+        // A UNIQUE index would be the tidier fix, and it was considered. It is rejected
+        // for this release because adding one to a live client site whose table may
+        // ALREADY contain duplicate rows aborts the upgrade half-way — the plugin would be
+        // left un-upgradeable, which is a worse failure than the one being fixed, and it
+        // is not something to discover on a paying customer's site during a point release.
+        // Handling the set is correct regardless of what the schema does, so it is done
+        // here: newest row wins, older duplicates are reported at developer level so a
+        // site that has them can be cleaned up before any future index is introduced.
+        $matches = $DB->get_records(
+            'plagiarism_docguard_sub',
+            [
+                'userid'      => $userid,
+                'cmid'        => $cmid,
+                'contenthash' => $contenthash,
+                ],
+            'timemodified DESC, id DESC'
+        );
+        $existing = $matches ? reset($matches) : null;
+        if (count($matches) > 1) {
+            \debugging(
+                'DocGuard: ' . count($matches) . ' duplicate submission records for user ' . $userid
+                    . ' cm ' . $cmid . ' contenthash ' . $contenthash . ' — using the most recent (id '
+                    . $existing->id . '). The extras are stale and can be deleted.',
+                DEBUG_DEVELOPER
+            );
+        }
         if ($existing && $existing->status === 'analysed') {
             return; // Already analysed — do not re-analyse unchanged file.
         }
@@ -163,7 +341,7 @@ class observer {
             return;
         }
 
-        // ── Persist per-section records BEFORE flipping the parent status ─────
+        /* ── Persist per-section records BEFORE flipping the parent status ───── */
         //
         // FIX-DG-SECTION-ORDER (v1.0.78): the parent record used to be updated to
         // status='analysed' first and the section rows inserted afterwards. Any
@@ -179,17 +357,17 @@ class observer {
         // UNIQUE index on (subid, section_num), but question_parser treats
         // "Question N", "Answer N", "Task N" etc. as the same integer, so an
         // ordinary template laid out as
-        //     Question 1 / Answer 1 / Question 2 / Answer 2
+        // Question 1 / Answer 1 / Question 2 / Answer 2
         // produced the sequence 1,1,2,2. The second insert threw
         // dml_write_exception and aborted the whole loop. The parsed number is
         // still visible to the teacher — it is part of section_label ("Answer 1").
         // Sequential numbering also preserves document order for the
         // "ORDER BY section_num ASC" the report uses.
         $sectime         = time();
-        $section_stored  = 0;
-        $section_failed  = 0;
-        $section_num     = 0;
-        $first_failure   = '';
+        $sectionstored  = 0;
+        $sectionfailed  = 0;
+        $sectionnum     = 0;
+        $firstfailure   = '';
 
         // Outer guard: nothing in this block may escape before the parent record is
         // updated below. If it did, the record would be left at status='pending'
@@ -199,19 +377,19 @@ class observer {
         // the same poison-pill shape this release fixes in the task itself.
         try {
             foreach ((array)($result['sections'] ?? []) as $sec) {
-                $section_num++;
+                $sectionnum++;
 
                 $rec = new \stdClass();
                 $rec->subid         = $subid;
                 $rec->userid        = $userid;
                 $rec->cmid          = $cmid;
-                $rec->section_num   = $section_num;
+                $rec->section_num   = $sectionnum;
                 // FIX-DG-MB-TRUNCATE (v1.0.78): byte-wise substr() could sever a
                 // multi-byte character, and MySQL/utf8mb4 rejects the resulting
                 // invalid string with "Incorrect string value" — another way the
                 // insert loop aborted mid-breakdown. core_text is multi-byte safe.
                 $rec->section_label = \core_text::substr((string)($sec['label'] ?? ''), 0, 128);
-                $rec->section_text  = \core_text::substr((string)($sec['text']  ?? ''), 0, 65000);
+                $rec->section_text  = \core_text::substr((string)($sec['text'] ?? ''), 0, 65000);
                 $rec->wordcount     = (int)($sec['wordcount'] ?? 0);
                 $rec->riskscore     = (float)($sec['riskscore'] ?? 0);
                 $rec->risklevel     = (string)($sec['risklevel'] ?? 'low');
@@ -222,36 +400,51 @@ class observer {
                 // rest of the breakdown.
                 try {
                     $DB->insert_record('plagiarism_docguard_sec', $rec);
-                    $section_stored++;
+                    $sectionstored++;
                 } catch (\Throwable $e) {
-                    $section_failed++;
-                    if ($first_failure === '') {
-                        $first_failure = $e->getMessage();
+                    $sectionfailed++;
+                    if ($firstfailure === '') {
+                        $firstfailure = $e->getMessage();
                     }
                     \debugging(
-                        'DocGuard: failed to store section ' . $section_num . ' of submission '
+                        'DocGuard: failed to store section ' . $sectionnum . ' of submission '
                             . $subid . ' — ' . $e->getMessage(),
                         DEBUG_DEVELOPER
                     );
                 }
             }
         } catch (\Throwable $e) {
-            $section_failed++;
-            if ($first_failure === '') {
-                $first_failure = $e->getMessage();
+            $sectionfailed++;
+            if ($firstfailure === '') {
+                $firstfailure = $e->getMessage();
             }
+            // V1.0.80: the outer guard swallowed its exception entirely. The parent record
+            // still ends up marked 'error' below, but nothing said what went wrong.
+            \debugging(
+                'DocGuard: section loop aborted for submission ' . $subid . ' — '
+                    . $e->getMessage(),
+                DEBUG_DEVELOPER
+            );
         }
 
-        // ── Persist the parent record ────────────────────────────────────────
+        /* ── Persist the parent record ──────────────────────────────────────── */
         // Count what is actually in the table rather than trusting this request's
         // tally: under the concurrent-re-analysis race described below, another
         // process may have stored the rows this one failed to insert, and reporting
         // "0 section(s) analysed" above a full breakdown would be worse than the bug
         // being fixed.
         try {
-            $section_actual = (int)$DB->count_records('plagiarism_docguard_sec', ['subid' => $subid]);
+            $sectionactual = (int)$DB->count_records('plagiarism_docguard_sec', ['subid' => $subid]);
         } catch (\Throwable $e) {
-            $section_actual = $section_stored;
+            // V1.0.80: was a silent fallback. If this count fails the reported
+            // section_count may not match what is actually stored, which is exactly the
+            // kind of quiet inconsistency the surrounding fix exists to prevent.
+            \debugging(
+                'DocGuard: could not count stored sections for submission ' . $subid
+                    . ' — falling back to this run\'s tally. ' . $e->getMessage(),
+                DEBUG_DEVELOPER
+            );
+            $sectionactual = $sectionstored;
         }
 
         $update = new \stdClass();
@@ -260,7 +453,7 @@ class observer {
         $update->overall_riskscore  = $result['overall_riskscore'];
         $update->overall_risklevel  = $result['overall_risklevel'];
         // Report what is actually viewable, not what was theoretically produced.
-        $update->section_count      = $section_actual;
+        $update->section_count      = $sectionactual;
         $update->analysisjson       = $result['analysisjson'];
         $update->normtext           = $result['normtext'];
         $update->errormsg           = $result['error'] ?? null;
@@ -276,14 +469,14 @@ class observer {
         // loser's inserts all collide on subid_secnum_ix. Without this check the
         // loser would overwrite the winner's perfectly good result with an error
         // status, hiding a breakdown that is sitting right there in the table.
-        if ($section_actual === 0 && !empty($result['sections'] ?? [])) {
+        if ($sectionactual === 0 && !empty($result['sections'] ?? [])) {
             $update->status = 'error';
             // Kept under 120 characters — lib.php truncates badge error text there.
-            $detail = $first_failure !== ''
-                ? ': ' . \core_text::substr(preg_replace('/\s+/', ' ', $first_failure), 0, 60)
+            $detail = $firstfailure !== ''
+                ? ': ' . \core_text::substr(preg_replace('/\s+/', ' ', $firstfailure), 0, 60)
                 : '.';
             $update->errormsg = 'Section breakdown could not be stored' . $detail . ' Use Re-analyse to retry.';
-        } else if ($section_failed > 0) {
+        } else if ($sectionfailed > 0) {
             // Partial failure. Deliberately NOT written to errormsg: that field is
             // only ever rendered for status='error' (lib.php badge, student_report
             // notification, report.php row title), so a note stored here would be
@@ -291,8 +484,8 @@ class observer {
             // reading the table. section_count above already reflects reality, and
             // the developer-level detail went to debugging() in the loop.
             \debugging(
-                'DocGuard: submission ' . $subid . ' stored ' . $section_actual
-                    . ' of ' . ($section_stored + $section_failed) . ' sections.',
+                'DocGuard: submission ' . $subid . ' stored ' . $sectionactual
+                    . ' of ' . ($sectionstored + $sectionfailed) . ' sections.',
                 DEBUG_DEVELOPER
             );
         }

@@ -19,7 +19,7 @@
  *
  * @package    plagiarism_docguard
  * @copyright  2026 LMS-Labs
- * @license    http://www.gnu.org/licenses/gpl-3.0.html GNU GPL v3 or later
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 
 defined('MOODLE_INTERNAL') || die();
@@ -28,6 +28,22 @@ $observers = [
     [
         'eventname' => '\mod_assign\event\assessable_submitted',
         'callback'  => 'plagiarism_docguard\observer::on_assessable_submitted',
+        'priority'  => 0,
+        'internal'  => false,
+    ],
+    [
+        // V1.0.88 FIX-DG-ORPHAN-ON-DELETE: DocGuard registered no deletion observer at
+        // all, so deleting an activity left every submission and section record it held —
+        // extracted document text included — in the database permanently AND beyond the
+        // reach of the privacy provider, which keys on a contextid core has just deleted.
+        // See observer::on_course_module_deleted() for the full reasoning.
+        //
+        // 'internal' => false so the callback runs after the surrounding transaction
+        // commits: course_delete_module() has already removed the context and the
+        // course_modules row by the time it triggers this event, and there is nothing to
+        // gain from deleting our rows inside a transaction that may still roll back.
+        'eventname' => '\core\event\course_module_deleted',
+        'callback'  => 'plagiarism_docguard\observer::on_course_module_deleted',
         'priority'  => 0,
         'internal'  => false,
     ],

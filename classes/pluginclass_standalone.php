@@ -14,7 +14,12 @@
 // You should have received a copy of the GNU General Public License
 // along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
 
-defined('MOODLE_INTERNAL') || die();
+// The class name below is shared with classes/pluginclass.php on purpose: the
+// spl_autoload_register in lib.php loads exactly one of the two per request, whichever
+// the presence of the plagiarism_plugin base class selects, so the two declarations can
+// never collide at runtime. Only a static scan that reads both files at once sees a
+// duplicate, so the check is switched off for this file.
+// phpcs:disable Generic.Classes.DuplicateClassName.Found
 
 /**
  * DocGuard plagiarism plugin class — Path A standalone fallback.
@@ -29,21 +34,52 @@ defined('MOODLE_INTERNAL') || die();
  * should never be reached on a normal web request.
  * @package    plagiarism_docguard
  * @copyright  2026 LMS-Labs
- * @license    http://www.gnu.org/licenses/gpl-3.0.html GNU GPL v3 or later
+ * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class plagiarism_plugin_docguard {
+    /**
+     * Legacy plagiarism API hook, retained so Moodle has something to call.
+     *
+     * DocGuard analyses submissions from the event observer and cron, so there is no
+     * per-view status work to do here.
+     *
+     * @param object $course The course record.
+     * @param object $cm     The course module record.
+     * @return bool Always true.
+     */
     public function update_status($course, $cm) {
         return true;
     }
 
+    /**
+     * Return the DocGuard badge and report links for one submitted file.
+     *
+     * @param array $linkarray Moodle plagiarism link data: cmid, userid, file and,
+     *                         where present, component and area.
+     * @return string HTML for the badge, or the empty string when nothing is shown.
+     */
     public function get_links($linkarray) {
         return plagiarism_docguard_get_links($linkarray);
     }
 
+    // V1.0.80: real disclosure, same as the Path B class — see
+    // plagiarism_docguard_print_disclosure() in lib.php.
+    /**
+     * Return the student-facing disclosure shown on the submission form.
+     *
+     * @param int $cmid The course module the student is submitting to.
+     * @return string HTML disclosure, or the empty string when DocGuard is not active here.
+     */
     public function print_disclosure($cmid) {
-        return '';
+        return plagiarism_docguard_print_disclosure((int)$cmid);
     }
 
+    /**
+     * Persist the per-activity "Enable DocGuard" checkbox when an activity is saved.
+     *
+     * @param object $data The submitted course module form data.
+     * @return void
+     */
     public function save_form_elements($data) {
         if (!empty($data->coursemodule)) {
             set_config(
@@ -54,8 +90,18 @@ class plagiarism_plugin_docguard {
         }
     }
 
+    /**
+     * Legacy per-module form hook.
+     *
+     * DocGuard adds its checkbox from plagiarism_docguard_coursemodule_standard_elements()
+     * in lib.php instead, so nothing is added here.
+     *
+     * @param object $mform      The course module form.
+     * @param object $context    The context the form is being built for.
+     * @param string $modulename The activity type, e.g. "assign".
+     * @return bool Always false.
+     */
     public function get_form_elements_module($mform, $context, $modulename = '') {
         return false;
     }
-
 }
