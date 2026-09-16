@@ -189,10 +189,20 @@ final class upgrade_test extends \advanced_testcase {
         $highest = max(array_map('intval', $matches[1]));
 
         $this->assertGreaterThanOrEqual($highest, (int)$plugin->version);
+
+        /*
+         * V1.0.92: this used to assert a hard-coded literal, which meant every release that
+         * added a savepoint had to remember to edit a test whose subject is "the version and
+         * the savepoints agree" — and a release that forgot turned four CI jobs red for a
+         * reason unrelated to the change being made. The invariant worth testing is the
+         * relationship, not the number, and it is asserted above and below.
+         */
         $this->assertSame(
-            2026082906,
+            (int)$plugin->version,
             $highest,
-            'This release adds a savepoint with real data work; it must be the highest one.'
+            'The newest savepoint must match $plugin->version exactly: a version bump with no '
+                . 'savepoint above the site\'s recorded version produces an upgrade that runs '
+                . 'no steps, and a savepoint above $plugin->version can never be reached.'
         );
     }
 }

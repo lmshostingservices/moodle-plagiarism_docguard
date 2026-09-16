@@ -78,9 +78,10 @@ class process_pending extends \core\task\scheduled_task {
         global $DB, $CFG;
 
         require_once($CFG->dirroot . '/plagiarism/docguard/lib.php');
-        require_once($CFG->dirroot . '/plagiarism/docguard/classes/observer.php');
-        require_once($CFG->dirroot . '/plagiarism/docguard/classes/analyser.php');
-        require_once($CFG->dirroot . '/plagiarism/docguard/classes/extractor.php');
+        // V1.0.92: only lib.php is required explicitly. It holds global functions and is
+        // not autoloadable; observer, analyser and extractor are classes under classes/,
+        // which Moodle's autoloader resolves on first use. Requiring them by hand was
+        // redundant and breaks if a class is ever moved or renamed.
 
         // V1.0.80: honour the site-wide switch. This task re-runs extraction and scoring
         // and stores document text, so an administrator who has switched DocGuard off
@@ -245,7 +246,7 @@ class process_pending extends \core\task\scheduled_task {
         // an administrator should discover after the fact.
         //
         // The reported fault (teachers unable to open the breakdown) does not depend
-        // on this phase: new submissions are handled by the event observer, stuck
+        // on this phase: new submissions are handled by the analyse_submission adhoc task, stuck
         // records by Phase 1 above, and a specific activity's backlog by the
         // "Scan & Analyse Unprocessed Submissions" button on the class report.
         if (!get_config('plagiarism_docguard', 'enablebackfill')) {
@@ -309,8 +310,8 @@ class process_pending extends \core\task\scheduled_task {
         // query was unreachable; the moment the phase went live it would have
         // thrown dml_read_exception on the majority of Moodle installs. Renamed
         // to "md". PostgreSQL would not have reproduced it.
-        // (4) Same gates the observer honours. classes/observer.php checks
-        // is_cm_active() and check_unlock() before analysing anything; a cron
+        // (4) Same gates the observer honours. the observer checks is_cm_active() and
+        // analyse_submission::execute() checks the licence before analysing anything; a cron
         // path that ignored them would analyse submissions on sites where an
         // administrator has switched plagiarism off, or that are not licensed.
         if (empty($CFG->enableplagiarism)) {

@@ -1,5 +1,94 @@
 # Changelog
 
+## 1.0.92 - 2026-09-16
+
+**Moodle Marketplace review MMRT-179**
+
+Version: `2026091600`. No database schema changes.
+
+### Security - Ghostscript ran student PDFs without `-dSAFER` (approval blocker)
+
+`classes/extractor.php` shelled out to `gs` with no `-dSAFER`. Every PDF reaching that
+method is a file a student uploaded, and without the flag Ghostscript honours PostScript
+operators that read and write arbitrary paths reachable by the web server user — and, on
+affected versions, execute commands through `%pipe%` device names. Ghostscript has enabled
+SAFER by default since 9.50, but the plugin declares no minimum Ghostscript version and
+runs whatever binary the host provides, so the flag is now passed explicitly.
+
+`-dSAFER` does not restrict reading the input file named on the command line, so
+extraction is unaffected.
+
+### Security - the licence API key travelled in the URL
+
+`curl::get($url, $params)` appends parameters to the URL, so the site's API key was written
+into the vendor's web-server access logs, every forward and reverse proxy log along the
+path, and any error or referrer reporting that records full URLs. The key now travels in an
+`X-API-Key` request header on both GET calls. The site ID stays in the query string: it
+identifies the site, it does not authenticate it. The third call already posted JSON.
+
+**Deployment note:** the lms-labs.com endpoints must read `X-API-Key`. Until they do,
+`/api/plagiarism-settings` answers non-200 and the site-wide platform flags silently stop
+applying, and `/api/plugin-unlock/verify` may answer 200 with `unlocked:false`, which sends
+`check_unlock()` into `auto_unlock()` — and that spends credits. Confirm server-side support
+before rolling this out.
+
+### Changed - submission analysis moved out of the event observer
+
+The `assessable_submitted` observer called `analyse_and_store()` once per submitted file,
+inline, in the student's own submit request. Each file costs an external process —
+`pdftotext` or Ghostscript, each with a 60-second timeout — plus scoring and several DB
+writes. A student submitting two PDFs to a host without poppler could watch a spinning
+submit button for two minutes, and a submission that ran past `max_execution_time` died
+half-written: record created, analysis not, and a server error shown for work Moodle had in
+fact accepted.
+
+The observer now records each supported file as `pending` and queues the new
+`analyse_submission` adhoc task. Badges read "Pending" until cron picks the task up.
+
+The licence check has also left the observer. `check_unlock()` is an outbound HTTP call of
+up to fifteen seconds whose `write_close()` guard fires only for AJAX and CLI, so on an
+ordinary submit it held the Moodle session write lock for that whole window and serialised
+every other request from the same browser. The adhoc task re-checks the licence, and every
+other gate, before it analyses anything.
+
+**Why the pending row is written in the observer and not left to the task:** that row is the
+plugin's only retry mechanism. `process_pending` Phase 1 looks for
+`status='pending' AND timecreated < now-300` and retries indefinitely. An adhoc task carries
+no such guarantee — core discards it after its attempts are exhausted, an administrator
+clearing a stuck adhoc queue deletes it, and `execute()` has several legitimate early
+returns. Without the row, any of those would leave a submission unanalysed, unretried and
+showing a grey Pending badge for ever.
+
+### Added - backup and restore support
+
+`backup/moodle2/` now carries the per-activity DocGuard setting through course backup,
+restore and duplicate. The setting is stored as the config key `enabled_cm_<cmid>`, so the
+restore class remaps it onto the new course module id; copying the value verbatim would
+write a setting belonging to nothing.
+
+Analysis results are deliberately **not** backed up. They are derived data about specific
+student submissions, they are keyed to file content hashes a restore does not reproduce, and
+copying extracted student text into a course backup — which administrators routinely
+download, email and archive — would turn a backup file into a data-protection problem. A
+restored activity re-analyses on submission, or via the class report's scan button.
+
+### Changed - autoloading and stylesheet loading
+
+Both scheduled tasks stopped `require_once`-ing `observer`, `analyser` and `extractor`:
+those are classes under `classes/`, which Moodle's autoloader resolves on first use.
+`lib.php` is still required explicitly, because it holds global functions and is not
+autoloadable.
+
+The two report pages no longer call `$PAGE->requires->css()` for the plugin's own
+`styles.css`. Moodle aggregates every plugin's `styles.css` into the theme stylesheet
+already, so the manual call loaded it a second time, outside the theme cache.
+
+### Documentation
+
+README now documents the two external binaries DocGuard shells out to (`pdftotext` and
+`gs`), exactly how each is invoked, why `-dSAFER` must not be removed, and why each call
+carries a 60-second timeout.
+
 ## 1.0.91 - 2026-09-07
 
 **Moodle 4.4 restored as the supported floor**

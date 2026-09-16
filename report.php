@@ -228,7 +228,9 @@ $PAGE->set_url(new moodle_url('/plagiarism/docguard/report.php', ['cmid' => $cmi
 $PAGE->set_context($context);
 $PAGE->set_title(get_string('classreport', 'plagiarism_docguard'));
 $PAGE->set_heading(get_string('classreport', 'plagiarism_docguard'));
-$PAGE->requires->css('/plagiarism/docguard/styles.css');
+// V1.0.92: no manual css() call. Moodle aggregates every plugin's styles.css into
+// the theme stylesheet automatically, so requiring it here loaded the file a second
+// time, outside the theme cache.
 
 echo $OUTPUT->header();
 

@@ -34,7 +34,7 @@ defined('MOODLE_INTERNAL') || die();
 //
 // Any future release that touches db/access.php or db/install.xml MUST raise this
 // number, and it must always be greater than or equal to the highest savepoint in
-// db/upgrade.php (currently 2026082906).
+// db/upgrade.php (currently 2026091600).
 // v1.0.85: this said 2026082803, which was never a savepoint in db/upgrade.php - the
 // highest is and was 2026082800. A comment that misstates the number it exists to
 // track is worse than no comment, because the next person bumping this file trusts it.
@@ -60,8 +60,8 @@ $plugin->component = 'plagiarism_docguard';
 // v1.0.87 shipped 2026082905 with no matching savepoint (the highest was 2026082800), which
 // is the mistake this comment block warns about: a site taking that release ran an upgrade
 // with no steps in it.
-$plugin->version   = 2026090702;
-$plugin->release   = '1.0.91';
+$plugin->version   = 2026091600;
+$plugin->release   = '1.0.92';
 
 // V1.0.85 / v1.2.225 FIX-REQUIRES-UNDERSTATED: this declared 2022041900 (Moodle 4.0) and
 // supported = [400, 501]. Both numbers were wrong, in opposite directions.

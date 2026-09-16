@@ -169,6 +169,32 @@ function plagiarism_docguard_get_apikey(): string {
 }
 
 /**
+ * Request headers carrying the API key for an outbound call to lms-labs.com.
+ *
+ * V1.0.92 SEC-DG-APIKEY-HEADER. The key used to be passed to curl::get() as a request
+ * parameter, and curl::get($url, $params) appends parameters to the URL — so the site's
+ * credential was written into the vendor's web-server access logs, into every forward and
+ * reverse proxy log along the path, and into any error or referrer reporting that records
+ * full URLs. Credentials do not belong in a URL. The site ID is not a credential and stays
+ * in the query string.
+ *
+ * One header only. Sending the key twice (X-API-Key and Authorization) would double the
+ * logging surface this change exists to reduce.
+ *
+ * NOTE FOR DEPLOYMENT: the lms-labs.com endpoints must read X-API-Key. Until they do,
+ * /api/plagiarism-settings answers non-200 and the site-wide platform flags silently stop
+ * applying, and /api/plugin-unlock/verify may answer 200 with unlocked:false, which sends
+ * check_unlock() into auto_unlock() — and that spends credits. Confirm server support
+ * before shipping this release.
+ *
+ * @param string $apikey The API key for this site.
+ * @return array Header lines suitable for curl::setHeader().
+ */
+function plagiarism_docguard_api_auth_headers(string $apikey): array {
+    return ['X-API-Key: ' . $apikey];
+}
+
+/**
  * Where the credentials in force actually come from.
  *
  * v1.0.85: the two accessors above silently prefer local_aiconfig when that plugin is
@@ -266,11 +292,11 @@ function plagiarism_docguard_get_platform_settings(): array {
         }
         $curl = new \curl();
         $curl->setopt(['CURLOPT_TIMEOUT' => 5, 'CURLOPT_CONNECTTIMEOUT' => 3]);
+        // V1.0.92 SEC-DG-APIKEY-HEADER: credential in a header, never the URL.
+        $curl->setHeader(plagiarism_docguard_api_auth_headers($apikey));
         $response  = $curl->get(
             'https://lms-labs.com/api/plagiarism-settings',
-            [
-                'siteId' => $siteid, 'apiKey' => $apikey,
-                ]
+            ['siteId' => $siteid]
         );
         $httpcode = (int)($curl->info['http_code'] ?? 0);
         if ($httpcode === 200 && !empty($response)) {
@@ -702,11 +728,11 @@ function plagiarism_docguard_check_unlock(): bool {
     require_once($CFG->libdir . '/filelib.php');
     $curl = new \curl();
     $curl->setopt(['CURLOPT_TIMEOUT' => 10, 'CURLOPT_CONNECTTIMEOUT' => 5]);
+    // V1.0.92 SEC-DG-APIKEY-HEADER: credential in a header, never the URL.
+    $curl->setHeader(plagiarism_docguard_api_auth_headers($apikey));
     $response  = $curl->get(
         'https://lms-labs.com/api/plugin-unlock/verify',
-        [
-            'pluginId' => 'docguard', 'siteId' => $siteid, 'apiKey' => $apikey,
-            ]
+        ['pluginId' => 'docguard', 'siteId' => $siteid]
     );
     $httpcode = (int)($curl->info['http_code'] ?? 0);
 

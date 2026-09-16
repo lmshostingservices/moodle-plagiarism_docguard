@@ -264,7 +264,19 @@ class extractor {
             $tmpout = tempnam(sys_get_temp_dir(), 'dg_gs_');
             // Timeout 60: gs can hang indefinitely on corrupt PDFs (confirmed incident July 2026
             // where a single bad PDF spawned 20+ stuck gs processes at 92% CPU each, load avg 47).
-            $cmd    = 'timeout 60 gs -dNOPAUSE -dBATCH -dQUIET -sDEVICE=txtwrite -dNoOutputFonts'
+            //
+            // V1.0.92 SEC-DG-GS-SAFER: -dSAFER is mandatory here. Every PDF reaching this
+            // method is a file a student uploaded. Without -dSAFER, Ghostscript honours
+            // PostScript operators that read and write arbitrary paths the web server user
+            // can reach, and on affected versions executes commands through %pipe% device
+            // names — so a crafted "submission" becomes file disclosure or worse on the
+            // Moodle host. Ghostscript enables SAFER by default from 9.50, but this plugin
+            // declares no minimum Ghostscript version and runs whatever binary the host
+            // provides, so the flag is passed explicitly rather than assumed.
+            //
+            // -dSAFER does not restrict reading the input file named on the command line,
+            // so text extraction is unaffected.
+            $cmd    = 'timeout 60 gs -dSAFER -dNOPAUSE -dBATCH -dQUIET -sDEVICE=txtwrite -dNoOutputFonts'
                     . ' -sOutputFile=' . escapeshellarg($tmpout)
                     . ' ' . escapeshellarg($filepath) . ' 2>/dev/null';
             $retval = 0;

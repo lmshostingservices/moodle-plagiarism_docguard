@@ -43,8 +43,6 @@ class observer {
      * @return void
      */
     public static function on_assessable_submitted(\mod_assign\event\assessable_submitted $event): void {
-        global $DB;
-
         $cmid = (int)$event->contextinstanceid;
 
         /*
@@ -99,18 +97,116 @@ class observer {
         if (!\plagiarism_docguard_is_cm_active($cmid)) {
             return;
         }
-        if (!\plagiarism_docguard_check_unlock()) {
+        /*
+         * V1.0.92: the licence check is NOT made here. check_unlock() is an outbound HTTP
+         * call — CURLOPT_CONNECTTIMEOUT 5 plus CURLOPT_TIMEOUT 10 — and its own
+         * write_close() guard fires only for AJAX and CLI, so on an ordinary submit it
+         * held the Moodle session write lock for up to fifteen seconds and serialised
+         * every other request from that browser. Taking the file work out of this callback
+         * while leaving a blocking network call in it would not have closed the finding.
+         *
+         * analyse_submission::execute() re-checks the licence before it analyses anything,
+         * which is the correct place for it: the task runs under cron with nothing waiting.
+         */
+
+        /*
+         * V1.0.92 PERF-DG-OBSERVER-ADHOC: queue the work, do not do it here.
+         *
+         * This callback used to call analyse_and_store() once per submitted file, inline,
+         * inside the student's own submit request. Each file costs an external process —
+         * pdftotext or Ghostscript, each with a 60-second timeout — plus signal scoring and
+         * several DB writes. A student submitting two PDFs to a host without poppler could
+         * therefore watch a spinning submit button for two minutes, and a submission that
+         * ran past max_execution_time died half-written: the record created, the analysis
+         * not, and the student shown a server error for work Moodle had in fact accepted.
+         *
+         * What remains here is deliberately cheap: the activity gate above, one
+         * file-storage read plus one insert per supported file (mark_pending(), below), and
+         * queueing the task. No extraction, no scoring, no outbound call. analyse_submission
+         * re-checks every gate at execution time, because the task may run long after the
+         * submission.
+         *
+         * The badge reads "Pending" until cron picks the task up, which is how every other
+         * asynchronous path in this plugin already behaves.
+         */
+        $context = \context_module::instance($cmid);
+
+        /*
+         * V1.0.92 FIX-DG-ADHOC-SAFETY-NET: write the pending rows here, before queueing.
+         *
+         * This is not bookkeeping — it is the plugin's only retry mechanism, and moving
+         * analysis to an adhoc task would otherwise have destroyed it.
+         *
+         * Until now the observer called analyse_and_store() inline, and the first thing
+         * that function does is insert the row with status='pending'. That row is what
+         * process_pending Phase 1 looks for ("status='pending' AND timecreated < now-300")
+         * and retries indefinitely. An adhoc task has no such guarantee: core discards it
+         * after $attemptsavailable failures, an administrator clearing a stuck adhoc queue
+         * deletes it, and execute() has several legitimate early returns. In every one of
+         * those cases, with no row written, there would be nothing left to retry and
+         * nothing to show — the submission would sit on a grey Pending badge for ever,
+         * which is precisely the class of failure this plugin has spent five releases
+         * closing.
+         *
+         * Writing the row first costs one file-storage read and one insert per file. No
+         * extraction, no scoring, no network: none of the work the reviewer objected to.
+         *
+         * The 5-minute grace window in Phase 1 is what makes the two mechanisms cooperate
+         * rather than collide — the adhoc task normally finishes well inside it, and Phase 1
+         * only picks the row up if it did not.
+         */
+        /*
+         * V1.0.92: gated on has_credentials(), which is a config read, not the network call
+         * check_unlock() makes.
+         *
+         * Without it an unlicensed site would start recording student submissions it has
+         * said nothing about: check_unlock() fails closed with no Site ID or API Key, so
+         * plagiarism_docguard_print_disclosure() returns '' and the student is never told
+         * their document is processed — while this method wrote a row holding their file
+         * name, content hash, user id and context. In 1.0.91 the observer's check_unlock()
+         * gate stopped that row existing at all. Those rows would also never drain, because
+         * process_pending Phase 1 returns on the same licence check before its loop.
+         */
+        if (!\plagiarism_docguard_has_credentials()) {
             return;
         }
 
-        // Write close to prevent session locking during API/heavy work.
-        \core\session\manager::write_close();
+        // Nothing analysable means nothing to queue. assessable_submitted also fires for
+        // online-text-only submissions and for uploads of types DocGuard cannot read;
+        // queueing for those left adhoc rows for cron to pick up and discard.
+        if (self::mark_pending($cmid, $userid, $submissionid, $context->id) === 0) {
+            return;
+        }
 
-        // Retrieve all files submitted in this assignment submission.
-        $context = \context_module::instance($cmid);
-        $fs      = \get_file_storage();
-        $files   = $fs->get_area_files(
-            $context->id,
+        \plagiarism_docguard\task\analyse_submission::queue(
+            $cmid,
+            $userid,
+            $submissionid,
+            $context->id
+        );
+    }
+
+    /**
+     * Record every supported file in a submission as pending, without analysing it.
+     *
+     * Deliberately does the minimum: no text extraction, no scoring, no outbound calls.
+     * An existing row for the same (userid, cmid, contenthash) is left exactly as it is —
+     * re-queueing must never reset an already-analysed result, and must never reset
+     * timecreated, which Phase 1's grace window depends on.
+     *
+     * @param int $cmid Course module id.
+     * @param int $userid The author of the work.
+     * @param int $submissionid The assign_submission id holding the files.
+     * @param int $contextid Module context id.
+     * @return int The number of supported files in the submission, whether or not this call
+     *             was the one that recorded them.
+     */
+    protected static function mark_pending(int $cmid, int $userid, int $submissionid, int $contextid): int {
+        global $DB;
+
+        $fs    = \get_file_storage();
+        $files = $fs->get_area_files(
+            $contextid,
             'assignsubmission_file',
             'submission_files',
             $submissionid,
@@ -118,12 +214,59 @@ class observer {
             false
         );
 
+        $supported = 0;
+
         foreach ($files as $file) {
-            if (!extractor::is_supported($file)) {
+            if ($file->is_directory() || !extractor::is_supported($file)) {
                 continue;
             }
-            self::analyse_and_store($file, $cmid, $userid, $submissionid, $context->id);
+            $supported++;
+
+            $contenthash = $file->get_contenthash();
+            if ($DB->record_exists('plagiarism_docguard_sub', [
+                'userid'      => $userid,
+                'cmid'        => $cmid,
+                'contenthash' => $contenthash,
+            ])) {
+                continue;
+            }
+
+            $now = time();
+            $sub = new \stdClass();
+            $sub->userid            = $userid;
+            $sub->cmid              = $cmid;
+            $sub->contextid         = $contextid;
+            $sub->submissionid      = $submissionid;
+            $sub->filename          = $file->get_filename();
+            $sub->filetype          = extractor::filetype($file);
+            $sub->contenthash       = $contenthash;
+            $sub->status            = 'pending';
+            $sub->section_count     = 0;
+            $sub->overall_riskscore = 0;
+            $sub->overall_risklevel = 'low';
+            $sub->timecreated       = $now;
+            $sub->timemodified      = $now;
+
+            try {
+                $DB->insert_record('plagiarism_docguard_sub', $sub);
+            } catch (\Throwable $e) {
+                // Never let bookkeeping break a student's submission.
+                //
+                // Note this is NOT the duplicate-row guard: db/install.xml declares
+                // userid_cmid_ix and contenthash_ix as ordinary non-unique indexes, so a
+                // concurrent writer does not make this insert throw — it makes it succeed
+                // twice. The record_exists() check above narrows that window; the duplicate
+                // handling in analyse_and_store() (newest row wins, extras reported) is what
+                // copes when it is lost.
+                \debugging(
+                    'DocGuard: could not pre-record pending row for user ' . $userid
+                        . ' cm ' . $cmid . ' — ' . $e->getMessage(),
+                    DEBUG_DEVELOPER
+                );
+            }
         }
+
+        return $supported;
     }
 
     /**

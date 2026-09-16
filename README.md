@@ -50,6 +50,30 @@ of misconduct, and every report says so.
   DocGuard falls back to a pure-PHP PDF parser when neither is available, but the
   external tools produce better text on complex documents.
 
+### External binaries DocGuard shells out to
+
+DocGuard invokes two command-line tools when they are present on the server's `PATH`.
+Administrators on locked-down or shared hosting should know this before installing.
+
+| Binary | Package | Used for | How it is invoked |
+|--------|---------|----------|-------------------|
+| `pdftotext` | poppler-utils | First-choice PDF text extraction | `timeout 60 pdftotext -layout -enc UTF-8 <file> -` |
+| `gs` | Ghostscript | Fallback PDF extraction when `pdftotext` is absent or returns unreadable text | `timeout 60 gs -dSAFER -dNOPAUSE -dBATCH -dQUIET -sDEVICE=txtwrite -dNoOutputFonts …` |
+
+Both are optional — DocGuard degrades to its pure-PHP PDF parser if neither exists — and
+neither is ever passed anything but a path to the submitted file. Every variable part of
+both command lines goes through `escapeshellarg()`, and the binary names are literals.
+
+`-dSAFER` is passed to Ghostscript explicitly and must not be removed. Every PDF reaching
+the extractor is a file a student uploaded, and without `-dSAFER` Ghostscript honours
+PostScript operators that read and write arbitrary paths reachable by the web server user —
+and, on affected versions, execute commands via `%pipe%` device names. Ghostscript has
+enabled SAFER by default since 9.50, but DocGuard declares no minimum Ghostscript version
+and runs whatever binary the host provides, so the flag is set rather than assumed.
+
+The 60-second `timeout` on each call is also deliberate: a malformed PDF can hang
+Ghostscript indefinitely, and without it every cron run left another stuck process behind.
+
 Supported activity types: **assignments** (`mod_assign`) only.
 Supported file types: **PDF** (`.pdf`) and **Word** (`.docx`). A genuine legacy binary
 `.doc` file is detected by its magic number and reported with a message asking the
@@ -199,9 +223,12 @@ the viewer is permitted to see.
 | DocGuard — process pending and untracked submissions | Retries submissions still marked pending, and optionally backfills older ones when the backfill setting is on. |
 | DocGuard — clean up old submission text | Deletes extracted text past the retention window. |
 | DocGuard — scan and analyse an activity's unprocessed submissions | Ad-hoc task queued by the **Scan & Analyse Unprocessed Submissions** button on the class report. Runs in bounded batches and re-queues itself, so a large class cannot exhaust the cron worker's execution time. |
+| DocGuard — analyse a submitted assignment | Ad-hoc task queued by the submission event observer. Holds the extraction and scoring for one submission, so that work runs under cron instead of inline in the student's submit request. |
 
-DocGuard depends on Moodle cron running regularly. If submissions stay on "Pending",
-check the cron schedule first.
+DocGuard depends on Moodle cron running regularly. Since v1.0.92 that includes analysis of
+new submissions: the event observer queues an ad-hoc task rather than analysing inline, so
+a badge reads "Pending" until the next cron run picks it up. If submissions stay on
+"Pending" for longer than your cron interval, check the cron schedule first.
 
 ---
 

@@ -16,6 +16,8 @@
 
 namespace plagiarism_docguard;
 
+use plagiarism_docguard\task\analyse_submission;
+
 defined('MOODLE_INTERNAL') || die();
 
 global $CFG;
@@ -94,6 +96,37 @@ final class observer_test extends \advanced_testcase {
         // so a triggered event would prove nothing either way.)
         observer::on_assessable_submitted($event);
 
+        /*
+         * V1.0.92 PERF-DG-OBSERVER-ADHOC: the observer queues, it does not analyse. The
+         * event payload assertions above still matter — they are what the 1.0.88 fix was
+         * about — so they are now checked on the queued task's custom data, and the task
+         * is then executed so the end-to-end result is still asserted below.
+         */
+        // The observer records the file as pending and queues the work. It must NOT have
+        // analysed anything inline — but it must leave the retryable pending row behind,
+        // because that row is what process_pending Phase 1 recovers if the task is lost.
+        $pending = $DB->get_record('plagiarism_docguard_sub', ['userid' => $student->id]);
+        $this->assertNotFalse($pending, 'The observer must pre-record the submission as pending.');
+        $this->assertSame('pending', $pending->status);
+        $this->assertSame('report.docx', $pending->filename);
+        $this->assertGreaterThan(0, (int)$pending->timecreated);
+        $this->assertSame(
+            0,
+            $DB->count_records('plagiarism_docguard_sec'),
+            'The observer must not analyse inline; that work belongs to the adhoc task.'
+        );
+
+        $tasks = \core\task\manager::get_adhoc_tasks(analyse_submission::class);
+        $this->assertCount(1, $tasks, 'The observer must queue exactly one analysis task.');
+        $queued = reset($tasks);
+        $data   = $queued->get_custom_data();
+        $this->assertEquals($parts['submission']->id, (int)$data->submissionid);
+        $this->assertEquals($student->id, (int)$data->userid);
+        $this->assertEquals($act['cm']->id, (int)$data->cmid);
+        $this->assertEquals($act['context']->id, (int)$data->contextid);
+
+        $queued->execute();
+
         $record = $DB->get_record('plagiarism_docguard_sub', ['userid' => $student->id]);
         $this->assertNotFalse($record, 'The core submission event must produce a record.');
         $this->assertSame('analysed', $record->status);
@@ -163,17 +196,33 @@ final class observer_test extends \advanced_testcase {
 
         observer::on_assessable_submitted($event);
 
+        // V1.0.92: attribution is now carried on the queued task, so assert it there as
+        // well as on the stored record — the task's userid is what files the work.
+        $tasks = \core\task\manager::get_adhoc_tasks(analyse_submission::class);
+        $this->assertCount(1, $tasks);
+        $queued = reset($tasks);
+        $this->assertEquals(
+            $student->id,
+            (int)$queued->get_custom_data()->userid,
+            'The task must carry the author, not the submitter.'
+        );
+        $queued->execute();
+
         $this->assertSame(1, $DB->count_records('plagiarism_docguard_sub', ['userid' => $student->id]));
         $this->assertSame(0, $DB->count_records('plagiarism_docguard_sub', ['userid' => $teacher->id]));
     }
 
     /**
-     * A file type DocGuard cannot read is skipped by the observer without leaving a
-     * record behind, so the badge never claims anything about it.
+     * A file type DocGuard cannot read leaves no record behind, so the badge never
+     * claims anything about it.
+     *
+     * V1.0.92: the observer pre-records supported files as pending and queues the adhoc
+     * task; unsupported files are filtered out of both, so neither the pending row nor the
+     * analysis ever happens for them.
      *
      * @return void
      */
-    public function test_observer_skips_unsupported_file_type(): void {
+    public function test_unsupported_file_type_leaves_no_record(): void {
         global $DB;
         $this->resetAfterTest();
         $this->enable_docguard();
@@ -184,6 +233,13 @@ final class observer_test extends \advanced_testcase {
         $parts = $this->submit_file($act, $student, 'notes.txt', str_repeat('plain text content. ', 20));
 
         observer::on_assessable_submitted($this->make_event($act, $parts, $student));
+
+        // V1.0.92: the observer filters on file type before it records or queues anything,
+        // so an unsupported upload produces neither a pending row nor a task. Draining any
+        // task that did get queued must still leave nothing behind.
+        foreach (\core\task\manager::get_adhoc_tasks(analyse_submission::class) as $queued) {
+            $queued->execute();
+        }
 
         $this->assertSame(0, $DB->count_records('plagiarism_docguard_sub'));
     }

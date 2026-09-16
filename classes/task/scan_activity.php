@@ -109,9 +109,10 @@ class scan_activity extends \core\task\adhoc_task {
         global $DB, $CFG;
 
         require_once($CFG->dirroot . '/plagiarism/docguard/lib.php');
-        require_once($CFG->dirroot . '/plagiarism/docguard/classes/observer.php');
-        require_once($CFG->dirroot . '/plagiarism/docguard/classes/analyser.php');
-        require_once($CFG->dirroot . '/plagiarism/docguard/classes/extractor.php');
+        // V1.0.92: only lib.php is required explicitly. It holds global functions and is
+        // not autoloadable; observer, analyser and extractor are classes under classes/,
+        // which Moodle's autoloader resolves on first use. Requiring them by hand was
+        // redundant and breaks if a class is ever moved or renamed.
 
         $data      = $this->get_custom_data();
         $cmid      = (int)($data->cmid ?? 0);

@@ -421,5 +421,42 @@ function xmldb_plagiarism_docguard_upgrade($oldversion) {
         upgrade_plugin_savepoint(true, 2026082906, 'plagiarism', 'docguard');
     }
 
+    if ($oldversion < 2026091600) {
+        /*
+         * V1.0.92 — Moodle Marketplace review MMRT-179.
+         *
+         * No schema changes. Every item in this release is code or packaging:
+         *
+         *   SEC-DG-GS-SAFER      -dSAFER added to the Ghostscript command line in
+         *                        classes/extractor.php. Approval blocker: every PDF
+         *                        reaching the extractor is a student upload, and without
+         *                        the flag Ghostscript honours PostScript operators that
+         *                        read and write arbitrary paths, and on affected versions
+         *                        execute commands through %pipe% device names.
+         *
+         *   SEC-DG-APIKEY-HEADER The licence API key now travels in a request header
+         *                        instead of the query string. curl::get($url, $params)
+         *                        appends parameters to the URL, so the credential was
+         *                        written into the vendor's access logs, every proxy log on
+         *                        the path, and any reporting that records full URLs.
+         *
+         *   PERF-DG-OBSERVER-ADHOC  The assessable_submitted observer queues the new
+         *                        analyse_submission adhoc task instead of running
+         *                        extraction and scoring inline in the student's submit
+         *                        request.
+         *
+         *   Backup/restore       backup/moodle2/ now carries the per-activity enablement
+         *                        flag through course backup, restore and duplicate. It is
+         *                        stored as config key enabled_cm_<cmid>, so the restore
+         *                        class remaps it onto the new course module id.
+         *
+         *   Autoloading, CSS     Redundant require_once of autoloaded classes removed from
+         *                        both scheduled tasks; manual $PAGE->requires->css() calls
+         *                        removed from the two report pages, since Moodle already
+         *                        aggregates every plugin's styles.css.
+         */
+        upgrade_plugin_savepoint(true, 2026091600, 'plagiarism', 'docguard');
+    }
+
     return true;
 }
