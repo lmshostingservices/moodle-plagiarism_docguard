@@ -183,7 +183,8 @@ if (optional_param('reanalyse', 0, PARAM_INT) === 1) {
 $student = $DB->get_record(
     'user',
     ['id' => $sub->userid],
-    'id,firstname,lastname,username,firstnamephonetic,lastnamephonetic,middlename,alternatename',
+    // V1.1.4: one source of truth - see analyser::user_fields_for_fullname().
+    \plagiarism_docguard\analyser::user_fields_for_fullname(),
     IGNORE_MISSING
 );
 $fn      = $student ? fullname($student) : get_string('unknownuser', 'plagiarism_docguard', $sub->userid);

@@ -946,5 +946,42 @@ function xmldb_plagiarism_docguard_upgrade($oldversion) {
         upgrade_plugin_savepoint(true, 2026101600, 'plagiarism', 'docguard');
     }
 
+    if ($oldversion < 2026101700) {
+        /*
+         * V1.1.4 FIX-DG-FULLNAME-MISSING-NAME-FIELDS. No schema change.
+         *
+         * cross_student_similarity() selected only 'id, username, firstname, lastname' and
+         * then called fullname() on the result. fullname() requires every name field Moodle
+         * defines - firstnamephonetic, lastnamephonetic, middlename and alternatename as
+         * well - and emits a developer warning when handed an object without them. On a
+         * site with developer debugging on, opening a student report with a flagged pair
+         * produced that warning once per match.
+         *
+         * WHY IT HAPPENED, which matters more than the four missing names: report.php and
+         * student_report.php each carried their OWN hardcoded copy of the eight-name list,
+         * and the analyser carried a third copy that had four. Three transcriptions of a
+         * list that belongs to Moodle, drifting independently.
+         *
+         * Fixed at the cause. analyser::user_fields_for_fullname() derives the list from
+         * \core_user\fields::for_name(), which is the authoritative source and what
+         * fullname() is itself built around, and all three call sites now come through it.
+         * If Moodle adds a name field, the plugin follows automatically.
+         *
+         * No fallback for a missing \core_user\fields. Moodle 4.4 is this plugin's floor
+         * and the class arrived in 3.11, so a fallback could only ever silently reinstate
+         * the bug. Failing loudly is correct.
+         *
+         * Guarded three ways: an offline test asserting the list covers every field
+         * \core_user\fields reports; an offline test asserting no call site has
+         * reintroduced a hardcoded list, with comments stripped first so the explanatory
+         * notes do not satisfy it; and - the authoritative one, which needs a real Moodle -
+         * test_cross_student_similarity_emits_no_debugging(), which builds two matching
+         * submissions from real users, runs the comparison and calls
+         * assertDebuggingNotCalled(). A field-list assertion can say the list looks right;
+         * only fullname() can say it is satisfied.
+         */
+        upgrade_plugin_savepoint(true, 2026101700, 'plagiarism', 'docguard');
+    }
+
     return true;
 }

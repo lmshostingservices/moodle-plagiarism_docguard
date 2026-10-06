@@ -513,4 +513,50 @@ final class signal_validity_test extends \advanced_testcase {
         $this->assertSame(99.0, $own[0]['riskscore'],
             'The self-match is excluded from writes but still counts toward its own score.');
     }
+
+    /**
+     * The user field list must cover every name field fullname() requires.
+     *
+     * V1.1.4. cross_student_similarity() selected only id, username, firstname and
+     * lastname, then called fullname() on the result. fullname() wants every name field
+     * Moodle defines and emits a developer warning without them, so on a site with
+     * developer debugging on, every flagged pair produced a warning.
+     *
+     * Asserted against \core_user\fields rather than a transcribed list, because a
+     * transcribed list is exactly what drifted: report.php and student_report.php each
+     * carried their own hardcoded copy of eight names and the analyser's copy had four.
+     */
+    public function test_user_field_list_covers_every_name_field(): void {
+        $fields = analyser::user_fields_for_fullname();
+        $listed = array_map('trim', explode(',', $fields));
+
+        foreach (\core_user\fields::get_name_fields() as $required) {
+            $this->assertContains($required, $listed,
+                "fullname() requires {$required}, which this field list does not select");
+        }
+
+        // id is needed to key the records; username is read by the caller.
+        $this->assertContains('id', $listed, 'records are keyed by id');
+        $this->assertContains('username', $listed, 'the caller reads ->username');
+    }
+
+    /**
+     * The helper must not be bypassed by a hardcoded list reappearing.
+     */
+    public function test_no_call_site_hardcodes_the_name_fields(): void {
+        foreach (['report.php', 'student_report.php', 'classes/analyser.php'] as $file) {
+            $src = file_get_contents(__DIR__ . '/../' . $file);
+            // Strip comments so the explanatory notes do not count as code. This check has
+            // matched a comment rather than code four times in this release series.
+            $code = implode("\n", array_filter(
+                explode("\n", $src),
+                fn($l) => !preg_match('~^\s*(\*|//|/\*)~', $l)
+            ));
+            $this->assertDoesNotMatchRegularExpression(
+                '/[\'"]id\s*,\s*(username\s*,\s*)?firstname\s*,\s*lastname/i',
+                $code,
+                $file . ' must take its user field list from user_fields_for_fullname()'
+            );
+        }
+    }
 }

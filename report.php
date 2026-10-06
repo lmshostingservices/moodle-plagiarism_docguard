@@ -433,7 +433,10 @@ $dgusers = $dguserids
         'id',
         array_keys($dguserids),
         '',
-        'id,firstname,lastname,username,firstnamephonetic,lastnamephonetic,middlename,alternatename'
+        // V1.1.4: one source of truth. This was a hardcoded eight-name string here and in
+        // student_report.php, and the copy in analyser.php had drifted to four, which is
+        // what made fullname() warn. See analyser::user_fields_for_fullname().
+        \plagiarism_docguard\analyser::user_fields_for_fullname()
     )
     : [];
 

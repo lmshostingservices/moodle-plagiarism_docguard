@@ -102,19 +102,64 @@ final class analyser_test extends \advanced_testcase {
             'A section carries no score. The submission score is copy evidence.');
     }
 
+    /**
+     * cross_student_similarity() must not make fullname() complain.
+     *
+     * V1.1.4. This is the authoritative check and it needs a real Moodle: it builds two
+     * genuinely similar submissions from real users, runs the comparison, and asserts that
+     * Moodle emitted no developer warning. A field-list assertion can confirm the list
+     * looks right; only fullname() itself can confirm it is satisfied.
+     *
+     * The defect it guards: the method selected id, username, firstname and lastname, then
+     * called fullname(), which wants every name field Moodle defines. With developer
+     * debugging on, every flagged pair produced a warning.
+     *
+     * @return void
+     */
+    public function test_cross_student_similarity_emits_no_debugging(): void {
+        global $DB;
+        $this->resetAfterTest();
 
+        $shared = 'To wash your hands correctly you first wet your hands with clean running '
+            . 'water. Then you apply enough soap to cover all the surfaces of your hands. '
+            . 'You rub your palms together and then rub the back of each hand with the palm '
+            . 'of the other hand. You keep rubbing for at least twenty seconds and then '
+            . 'rinse your hands well under clean running water before drying them.';
 
+        $course = $this->getDataGenerator()->create_course();
+        $one    = $this->getDataGenerator()->create_and_enrol($course, 'student');
+        $two    = $this->getDataGenerator()->create_and_enrol($course, 'student');
 
+        $norm = question_parser::normalise_for_similarity($shared);
+        $mk = function (int $userid) use ($DB, $norm): int {
+            return (int)$DB->insert_record('plagiarism_docguard_sub', (object)[
+                'cmid'              => 424242,
+                'userid'            => $userid,
+                'submissionid'      => 0,
+                'filename'          => 'answer.pdf',
+                'status'            => 'analysed',
+                'overall_riskscore' => 0,
+                'overall_risklevel' => 'low',
+                'section_count'     => 1,
+                'normtext'          => $norm,
+                'timecreated'       => time(),
+                'timemodified'      => time(),
+            ]);
+        };
+        $first  = $mk((int)$one->id);
+        $second = $mk((int)$two->id);
 
+        $matches = analyser::cross_student_similarity($second, 424242, $norm);
 
+        // The point of the test.
+        $this->assertDebuggingNotCalled();
 
-
-
-
-
-
-
-
-
-
+        // And the comparison must actually have produced a match, or nothing was proved.
+        $this->assertNotEmpty($matches, 'identical text must match, or this test is vacuous');
+        $this->assertSame($first, (int)$matches[0]['subid']);
+        $this->assertNotSame('', trim((string)$matches[0]['fullname']),
+            'fullname() must return a usable name');
+        $this->assertNotSame('Unknown', $matches[0]['fullname'],
+            'the user record must have been found');
+    }
 }

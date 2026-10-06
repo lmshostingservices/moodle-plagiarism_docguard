@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.1.4 - 2026-10-06
+
+**`fullname()` was being handed an incomplete user record.** Version `2026101700`. No schema
+change.
+
+`cross_student_similarity()` selected only `id, username, firstname, lastname` and then
+called `fullname()` on the result. `fullname()` requires **every** name field Moodle
+defines — `firstnamephonetic`, `lastnamephonetic`, `middlename` and `alternatename` as well
+— and emits a developer warning when handed an object without them. On a site with
+developer debugging on, opening a student report with a flagged pair produced that warning
+once per match.
+
+### Why it happened matters more than the four missing names
+
+`report.php` and `student_report.php` each carried their **own** hardcoded copy of the
+eight-name list. The analyser carried a third copy, with four. Three transcriptions of a
+list that belongs to Moodle, drifting independently — and the drift is the bug.
+
+### Fixed at the cause
+
+`analyser::user_fields_for_fullname()` derives the list from
+`\core_user\fields::for_name()` — the authoritative source, and what `fullname()` is
+itself built around. All three call sites now come through it, so they cannot drift again,
+and if Moodle adds a name field the plugin follows automatically.
+
+**No fallback** for a missing `\core_user\fields`. Moodle 4.4 is this plugin's floor and
+the class arrived in 3.11, so a fallback could only ever silently reinstate the bug.
+
+### Guarded three ways, and no warning is suppressed
+
+| Guard | Runs |
+|---|---|
+| The list covers every field `\core_user\fields` reports | offline |
+| No call site has reintroduced a hardcoded list (comments stripped first) | offline |
+| **`assertDebuggingNotCalled()` after a real comparison between real users** | needs a real Moodle |
+
+The third is the authoritative one. A field-list assertion can say the list *looks* right;
+only `fullname()` can say it is *satisfied*. It builds two matching submissions from
+generated users, runs `cross_student_similarity()`, and asserts Moodle emitted nothing —
+and also asserts a match was actually produced, so it cannot pass vacuously.
+
+Mutation suite extended to 19: reverting the helper to four fields, and reintroducing a
+hardcoded list in `report.php`, are both caught.
+
 ## 1.1.3 - 2026-10-06
 
 **From the first full run of the test suite on a real Moodle.** Version `2026101600`. No

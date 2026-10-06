@@ -564,7 +564,7 @@ class analyser {
             "id $insql",
             $inparams,
             '',
-            'id, username, firstname, lastname'
+            self::user_fields_for_fullname()
         );
 
         $results = [];
@@ -586,6 +586,37 @@ class analyser {
 
 
     /* ── Helpers ─────────────────────────────────────────────────────────────── */
+
+    /**
+     * The user columns fullname() requires, as a field list for $DB.
+     *
+     * V1.1.4 FIX-DG-FULLNAME-MISSING-NAME-FIELDS.
+     *
+     * cross_student_similarity() selected only 'id, username, firstname, lastname' and then
+     * called fullname() on the result. fullname() needs every name field Moodle defines -
+     * firstnamephonetic, lastnamephonetic, middlename and alternatename as well - and emits
+     * a developer warning when handed an object without them. On a site with developer
+     * debugging on, opening a student report with a flagged pair produced that warning for
+     * every match.
+     *
+     * report.php and student_report.php already selected the full set, but as a hardcoded
+     * eight-name string, in two places, which is how this one came to differ from them. The
+     * list is not ours to maintain: \core_user\fields::for_name() is the authoritative
+     * source, it is what fullname() itself is built around, and it stays correct if Moodle
+     * ever adds a name field. All three call sites now come through here, so they cannot
+     * drift apart again.
+     *
+     * Moodle 4.4 is the floor for this plugin and \core_user\fields arrived in 3.11, so
+     * there is deliberately no fallback: a fallback would silently reinstate the bug on any
+     * site where the class were missing, and failing loudly is the correct behaviour.
+     *
+     * @return string Field list for a $DB user query, suitable for passing to fullname().
+     */
+    public static function user_fields_for_fullname(): string {
+        $namefields = \core_user\fields::for_name()->get_sql('', false, '', '', false)->selects;
+
+        return 'id, username, ' . ltrim($namefields, ', ');
+    }
 
     /**
      * The score for a submission: how similar it is to another submission, as a percentage.
