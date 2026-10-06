@@ -103,8 +103,31 @@ $enabled        = (int)get_config('plagiarism_docguard', 'enabled');
 $enablebackfill = (int)get_config('plagiarism_docguard', 'enablebackfill');
 $retentiondays  = plagiarism_docguard_retention_days();
 
+/*
+ * V1.1.3. Tell the administrator which PDF extraction tier this server is on.
+ *
+ * Nothing used to. A live site was found running the pure-PHP fallback because
+ * poppler-utils was not installed, and no page in the plugin said so. Copy detection runs
+ * on extracted text, so the tier is not a detail - it decides whether the similarity
+ * figures mean anything.
+ */
+$dgtools = \plagiarism_docguard\extractor::extraction_tools();
+
 echo $OUTPUT->header();
 echo $OUTPUT->heading(get_string('pluginname', 'plagiarism_docguard'));
+
+$dgtiercolour = ['best' => ['#065f46', '#ecfdf5', '#a7f3d0'],
+                 'workable' => ['#92400e', '#fffbeb', '#fde68a'],
+                 'lowest' => ['#991b1b', '#fef2f2', '#fecaca']][$dgtools['quality']];
+echo '<div style="background:' . $dgtiercolour[1] . ';border:1px solid ' . $dgtiercolour[2]
+    . ';border-left:4px solid ' . $dgtiercolour[0] . ';border-radius:6px;padding:0.85rem 1.1rem;'
+    . 'margin:0 0 1.25rem;font-size:0.88rem;color:' . $dgtiercolour[0] . ';line-height:1.6;">'
+    . '<strong>' . s(get_string('pdfextractiontier', 'plagiarism_docguard', (object)[
+        'tier'    => $dgtools['tier'],
+        'quality' => $dgtools['quality'],
+    ])) . '</strong>'
+    . ($dgtools['advice'] !== '' ? '<br>' . s($dgtools['advice']) : '')
+    . '</div>';
 
 // Status panel - CACHED config only. No vendor API call on a render path.
 $notices = [];

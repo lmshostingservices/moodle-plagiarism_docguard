@@ -302,6 +302,50 @@ class extractor {
      * @param string $cmd The command name to look for, e.g. "pdftotext".
      * @return bool True when the command was found on the PATH.
      */
+    /**
+     * Which PDF extraction tier this server will actually use.
+     *
+     * V1.1.3. PDF text is extracted by a three-tier cascade - pdftotext, then Ghostscript,
+     * then a pure-PHP fallback - and until now nothing anywhere told an administrator
+     * which tier their server was on. Found when the plugin's own test suite skipped a
+     * digit-heavy extraction test on a live server because pdftotext was not installed:
+     * the extraction was silently running on the lowest tier and no page said so.
+     *
+     * This is not cosmetic. Extraction quality decides whether copy detection works at
+     * all - the comparison runs on extracted text, so a garbled extraction produces a
+     * similarity figure about nothing. An administrator should not have to read the source
+     * to find out which one they have.
+     *
+     * @return array{tier: string, quality: string, pdftotext: bool, ghostscript: bool, advice: string}
+     */
+    public static function extraction_tools(): array {
+        $pdftotext   = self::cli_available('pdftotext');
+        $ghostscript = self::cli_available('gs');
+
+        if ($pdftotext) {
+            return [
+                'tier' => 'pdftotext', 'quality' => 'best',
+                'pdftotext' => true, 'ghostscript' => $ghostscript,
+                'advice' => '',
+            ];
+        }
+        if ($ghostscript) {
+            return [
+                'tier' => 'ghostscript', 'quality' => 'workable',
+                'pdftotext' => false, 'ghostscript' => true,
+                'advice' => 'Install poppler-utils for pdftotext, which extracts layout more reliably.',
+            ];
+        }
+        return [
+            'tier' => 'pure-php', 'quality' => 'lowest',
+            'pdftotext' => false, 'ghostscript' => false,
+            'advice' => 'Install poppler-utils (pdftotext). Without it PDF text is extracted '
+                . 'by the built-in PHP fallback, which is the least reliable of the three and '
+                . 'may produce poor text on PDFs that are not plain and text-based. Copy '
+                . 'detection is only as good as the text it compares.',
+        ];
+    }
+
     private static function cli_available(string $cmd): bool {
         static $cache = [];
         if (!isset($cache[$cmd])) {

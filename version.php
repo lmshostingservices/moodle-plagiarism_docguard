@@ -60,8 +60,8 @@ $plugin->component = 'plagiarism_docguard';
 // v1.0.87 shipped 2026082905 with no matching savepoint (the highest was 2026082800), which
 // is the mistake this comment block warns about: a site taking that release ran an upgrade
 // with no steps in it.
-$plugin->version   = 2026101500;
-$plugin->release   = '1.1.2';
+$plugin->version   = 2026101600;
+$plugin->release   = '1.1.3';
 
 // V1.0.85 / v1.2.225 FIX-REQUIRES-UNDERSTATED: this declared 2022041900 (Moodle 4.0) and
 // supported = [400, 501]. Both numbers were wrong, in opposite directions.

@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.1.3 - 2026-10-06
+
+**From the first full run of the test suite on a real Moodle.** Version `2026101600`. No
+schema change.
+
+**192 passed, 1 failed, 1 skipped, 631 assertions.** Both the failure and the skip are
+addressed here. Sixty of those tests had never been executed before — they need Moodle's
+data generator and file API, which no offline harness can honestly fake.
+
+### A deleted activity was reported as disabled
+
+`scan_activity::execute()` checked `plagiarism_docguard_is_cm_active()` **before** checking
+whether the course module still existed. `is_cm_active()` returns false for a deleted
+module, so a queued scan whose activity was removed before cron reached it reported:
+
+> DocGuard is not enabled for this activity, abandoning scan
+
+…and the `no longer exists` branch below it was unreachable.
+
+Nothing was analysed wrongly — the scan stopped either way. The damage was to the
+diagnostic: an administrator reading cron output was sent looking for a setting on an
+activity that no longer exists.
+
+Existence is now checked first, which is also the cheaper question: a deleted activity
+short-circuits before the per-activity config lookup and before `check_unlock()`, which
+performs a licence verification.
+
+Caught by `test_execute_when_activity_has_gone`, which calls `course_delete_module()` and
+asserts the message.
+
+### The PDF extraction tier is now visible
+
+The digit-heavy extraction test skipped on that server because **`pdftotext` is not
+installed**. PDF text is extracted by a three-tier cascade — `pdftotext`, then Ghostscript,
+then a pure-PHP fallback that the code itself describes as *lowest* quality — and nothing
+anywhere told an administrator which tier their server was on. That site was silently
+running the fallback.
+
+This is not cosmetic. **The comparison runs on extracted text**, so a poor extraction
+produces a similarity figure about nothing.
+
+`extractor::extraction_tools()` now reports the tier. The settings page shows it in colour
+with the remedy, and `docguard-verify-install.php` reports it too:
+
+```
+pdftotext (poppler-utils) : NOT INSTALLED
+ghostscript               : not installed
+tier in use               : pure-php (lowest quality)
+```
+
+The remedy on a Debian/Ubuntu server is `apt install poppler-utils`.
+
 ## 1.1.2 - 2026-10-06
 
 **A measurement helper that measured the wrong thing.** Version `2026101500`. No schema

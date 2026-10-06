@@ -130,18 +130,40 @@ class scan_activity extends \core\task\adhoc_task {
             mtrace("DocGuard scan_activity: cm {$cmid} — plugin is disabled site-wide, abandoning scan.");
             return;
         }
+        /*
+         * V1.1.3 FIX-DG-DELETED-ACTIVITY-REPORTED-AS-DISABLED.
+         *
+         * Does the activity still exist? This check used to sit BELOW the two gates that
+         * follow it, and plagiarism_docguard_is_cm_active() returns false for a course
+         * module that has been deleted - so a queued scan whose activity was removed
+         * before cron reached it reported
+         *
+         *     "DocGuard is not enabled for this activity, abandoning scan"
+         *
+         * and the "no longer exists" branch was unreachable. The scan stopped either way,
+         * so nothing was analysed wrongly, but the diagnostic sent an administrator reading
+         * cron output to look for a setting on an activity that no longer exists.
+         *
+         * Existence is also the cheaper question: a deleted activity now short-circuits
+         * before the per-activity config lookup and before check_unlock(), which performs
+         * a licence verification.
+         *
+         * Found by the plugin's own test suite on a real Moodle - test_execute_when_
+         * activity_has_gone, which calls course_delete_module() and asserts the message.
+         * It is one of the tests that cannot run without Moodle's data generator, so it
+         * had never been executed before.
+         */
+        $cm = get_coursemodule_from_id('assign', $cmid, 0, false, IGNORE_MISSING);
+        if (!$cm) {
+            mtrace("DocGuard scan_activity: cm {$cmid} no longer exists.");
+            return;
+        }
         if (!\plagiarism_docguard_is_cm_active($cmid)) {
             mtrace("DocGuard scan_activity: cm {$cmid} — DocGuard is not enabled for this activity, abandoning scan.");
             return;
         }
         if (!\plagiarism_docguard_check_unlock()) {
             mtrace("DocGuard scan_activity: cm {$cmid} — plugin is not unlocked, abandoning scan.");
-            return;
-        }
-
-        $cm = get_coursemodule_from_id('assign', $cmid, 0, false, IGNORE_MISSING);
-        if (!$cm) {
-            mtrace("DocGuard scan_activity: cm {$cmid} no longer exists.");
             return;
         }
         $assign = $DB->get_record('assign', ['id' => $cm->instance]);
