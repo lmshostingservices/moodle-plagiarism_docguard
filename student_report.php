@@ -260,6 +260,27 @@ if ($sub->status !== 'analysed') {
 $score = (float)$sub->overall_riskscore;
 $barw = (int)min(100, $score);
 
+/*
+ * V1.0.99. What this number means depends on when the row was written.
+ *
+ * Model 1 (to 1.0.98) was a sum of writing-style points. Model 2 is the percentage of
+ * this submission's word pairs that appear in another submission to the same activity.
+ * Rows written before the change carry no stamp, and presenting an old style score under
+ * a heading about copying would be a straightforward misrepresentation, so legacy rows
+ * are labelled and their number is not shown as a verdict.
+ */
+$dganalysis   = json_decode((string)$sub->analysisjson, true) ?: [];
+$dgscoremodel = (int)($dganalysis['score_model'] ?? 1);
+$dglegacy     = $dgscoremodel < \plagiarism_docguard\analyser::SCORE_MODEL;
+
+if ($dglegacy) {
+    echo '<div style="background:#fffbeb;border:1px solid #fde68a;border-left:4px solid #f59e0b;'
+        . 'border-radius:6px;padding:0.9rem 1.2rem;margin-bottom:1.25rem;font-size:0.86rem;'
+        . 'color:#78350f;line-height:1.6;">'
+        . get_string('legacyscore', 'plagiarism_docguard')
+        . '</div>';
+}
+
 echo '<div style="background:' . $lb . ';border:1px solid ' . $lc . '33;border-radius:8px;padding:1.25rem '
     . '1.5rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:2rem;flex-wrap:wrap;">';
 echo '<div style="text-align:center;">';
@@ -277,8 +298,35 @@ $dgriskshort = [
     'medium' => core_text::strtoupper(get_string('risklevelshortmedium', 'plagiarism_docguard')),
     'high'   => core_text::strtoupper(get_string('risklevelshorthigh', 'plagiarism_docguard')),
 ];
+/*
+ * V1.0.93: the banner names what the number measures.
+ *
+ * It used to read "HIGH RISK" over a figure produced almost entirely by writing-style
+ * heuristics, next to a page headed "Plagiarism Report". A teacher had no way to tell
+ * that nothing had been compared against any source outside this activity. The band is
+ * unchanged; what it is a band OF is now stated.
+ */
+/*
+ * V1.0.99. The headline is copy evidence. Under model 1 it was a style-signal sum, and
+ * the style signals were measured against 48 answers written by three current language
+ * models and flagged none of them, while the highest-scoring document in the test set was
+ * a human second-language student. A number that cannot separate its two classes must not
+ * head a report a teacher may act on.
+ */
+echo '<div style="font-size:0.72rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;'
+    . 'color:#6b7280;margin-bottom:0.15rem;">'
+    . s(get_string($dglegacy ? 'aiindicatorsheading' : 'copyevidenceheading', 'plagiarism_docguard'))
+    . '</div>';
 echo '<div style="font-size:1.2rem;font-weight:700;color:' . $lc . ';margin-bottom:0.25rem;">'
     . ($dgriskbanners[$level] ?? strtoupper($level) . ' RISK') . '</div>';
+if (!$dglegacy) {
+    echo '<div style="font-size:0.84rem;color:#374151;line-height:1.55;margin-bottom:0.4rem;'
+        . 'max-width:46rem;">'
+        . ($score > 0
+            ? get_string('copyevidencescore', 'plagiarism_docguard', (int)round($score))
+            : get_string('copyevidencenone', 'plagiarism_docguard'))
+        . '</div>';
+}
 echo '<div class="docguard-score-bar-wrap" style="width:100%;max-width:300px;">';
 echo '<span class="docguard-score-bar docguard-score-bar-' . s($level) . '" style="width:' . $barw . '%;"></span>';
 echo '</div>';
@@ -361,159 +409,40 @@ if (empty($sections)) {
             echo '</div>';
         }
 
-        if (!empty($signals)) {
-            echo '<details style="font-size:0.82rem;margin-top:0.65rem;margin-bottom:0.4rem;">';
-            echo '<summary style="cursor:pointer;display:inline-flex;align-items:center;gap:0.4rem;padding:0.2rem '
-                . '0.65rem;border-radius:5px;border:1px solid '
-                . '#e5e7eb;background:#f9fafb;color:#374151;font-weight:600;font-size:0.8rem;'
-                . 'list-style:none;-webkit-appearance:none;">&#9432;&nbsp;'
-                . get_string('signalstatuskey', 'plagiarism_docguard') . '</summary>';
-            echo '<div style="margin-top:0.4rem;padding:0.65rem 0.9rem;background:#f9fafb;border:1px solid '
-                . '#e5e7eb;border-radius:6px;max-width:600px;display:flex;flex-direction:column;gap:0.5rem;">';
-            echo '<div style="display:flex;gap:0.65rem;align-items:baseline;">'
-                . '<span style="min-width:82px;font-size:0.8rem;font-weight:700;color:#991b1b;white-space:nowrap;flex-shrink:0;">'
-                . '&#9679;&nbsp;' . core_text::strtoupper(get_string('signalfired', 'plagiarism_docguard')) . '</span>'
-                . '<span style="font-size:0.82rem;color:#374151;">'
-                . get_string('signalfireddesc', 'plagiarism_docguard') . '</span>'
-                . '</div>';
-            echo '<div style="display:flex;gap:0.65rem;align-items:baseline;">'
-                . '<span style="min-width:82px;font-size:0.8rem;font-weight:600;color:#9ca3af;white-space:nowrap;flex-shrink:0;">'
-                . '&#9711;&nbsp;' . get_string('signalsilent', 'plagiarism_docguard') . '</span>'
-                . '<span style="font-size:0.82rem;color:#374151;">'
-                . get_string('signalsilentdesc', 'plagiarism_docguard') . '</span>'
-                . '</div>';
-            echo '</div></details>';
-            echo '<table class="docguard-signal-table" style="margin-top:0.5rem;">';
-            echo '<thead><tr>'
-                . '<th>' . get_string('colsignal', 'plagiarism_docguard') . '</th>'
-                . '<th>' . get_string('colstatus', 'plagiarism_docguard') . '</th>'
-                . '<th>' . get_string('colpoints', 'plagiarism_docguard') . '</th>'
-                . '<th style="min-width:220px;">' . get_string('coldetail', 'plagiarism_docguard') . '</th>'
-                . '</tr></thead><tbody>';
+        /*
+         * V1.0.99. The per-section signal table is gone.
+         *
+         * It listed eleven writing-style measurements with points and a fired/silent
+         * status. Tested against 48 answers written by three current language models it
+         * flagged none of them, while the highest-scoring document in the test set was a
+         * human second-language student. Those measurements are no longer computed, so
+         * there is nothing to table - and nothing here for a marker to read as
+         * corroborating the copy result above, which is how institutions came to
+         * over-rely on detector output in the appeals the OIA upheld.
+         *
+         * What is left is what a marker can use: the extracted text above, and a note
+         * saying what was set aside before this submission was compared with the others.
+         */
+        $dgscope = $signals['_scope'] ?? null;
 
-            $signalorder = [
-                's1_ai_markers', 's2_sentence_uniformity', 's3_ttr_uniformity',
-                's4_transitions', 's5_contractions', 's6_passive_voice',
-                's7_template', 's8_trigrams', 's9_sentence_starts',
-                's10_vocab_richness', 's11_cross_section',
-            ];
+        if (!empty($dgscope['excluded']) && !empty($dgscope['reason'])) {
+            echo '<p style="background:#eff6ff;border-left:3px solid #60a5fa;'
+                . 'padding:0.55rem 0.8rem;margin:0.6rem 0 0.2rem;font-size:0.82rem;'
+                . 'color:#1e3a8a;line-height:1.5;">'
+                . get_string('scopeexcluded', 'plagiarism_docguard', (object)[
+                    'words'  => (int)$dgscope['excluded'],
+                    'reason' => s((string)$dgscope['reason']),
+                ])
+                . '</p>';
+        }
 
-            $defined = array_merge(
-                array_intersect($signalorder, array_keys($signals)),
-                array_diff(array_keys($signals), $signalorder)
-            );
-
-            foreach ($defined as $key) {
-                if (!isset($signals[$key])) {
-                    continue;
-                }
-                $sig = $signals[$key];
-                $pts = (int)($sig['points'] ?? 0);
-                $max = (int)($sig['max'] ?? 0);
-                $lbl = $sig['label'] ?? $key;
-                $desc = $sig['description'] ?? '';
-                $frd = !empty($sig['fired']);
-
-                $statushtml = $frd
-                    ? '<span class="docguard-signal-fired" title="'
-                        . s(get_string('signalfiredtitle', 'plagiarism_docguard')) . '">&#9679; '
-                        . core_text::strtoupper(get_string('signalfired', 'plagiarism_docguard')) . '</span>'
-                    : '<span class="docguard-signal-silent" title="'
-                        . s(get_string('signalsilenttitle', 'plagiarism_docguard')) . '">&#9711; '
-                        . get_string('signalsilent', 'plagiarism_docguard') . '</span>';
-
-                $detailparts = [];
-                if (isset($sig['marker_count'])) {
-                    $detailparts[] = get_string('detailmarkers', 'plagiarism_docguard', $sig['marker_count']);
-                    if (!empty($sig['matches'])) {
-                        $detailparts[] = '"' . implode('", "', array_slice($sig['matches'], 0, 5)) . '"';
-                    }
-                }
-                if (isset($sig['mean_words'])) {
-                    $detailparts[] = get_string('detailmeansentence', 'plagiarism_docguard', $sig['mean_words']);
-                }
-                if (isset($sig['std_dev']) && $sig['std_dev'] !== null) {
-                    $detailparts[] = get_string('detailstddev', 'plagiarism_docguard', $sig['std_dev']);
-                }
-                if (isset($sig['ttr_std_dev']) && $sig['ttr_std_dev'] !== null) {
-                    $detailparts[] = get_string('detailttrstddev', 'plagiarism_docguard', $sig['ttr_std_dev']);
-                }
-                if (isset($sig['per_100'])) {
-                    $detailparts[] = get_string('detailper100', 'plagiarism_docguard', $sig['per_100']);
-                    if (!empty($sig['hits'])) {
-                        $detailparts[] = implode(', ', array_slice($sig['hits'], 0, 5));
-                    }
-                }
-                if (isset($sig['passive_count'])) {
-                    $detailparts[] = get_string(
-                        'detailpassive',
-                        'plagiarism_docguard',
-                        (object) ['count' => $sig['passive_count'], 'ratio' => $sig['ratio']]
-                    );
-                }
-                if (isset($sig['opener_found'])) {
-                    $detailparts[] = get_string(
-                        'detailopener',
-                        'plagiarism_docguard',
-                        $sig['opener_found']
-                            ? '"' . $sig['opener_hit'] . '"'
-                        : get_string('detailnone', 'plagiarism_docguard')
-                    );
-                    $detailparts[] = get_string(
-                        'detailcloser',
-                        'plagiarism_docguard',
-                        $sig['closer_found']
-                            ? '"' . $sig['closer_hit'] . '"'
-                        : get_string('detailnone', 'plagiarism_docguard')
-                    );
-                }
-                if (isset($sig['unique_ratio']) && $sig['unique_ratio'] !== null) {
-                    $detailparts[] = get_string(
-                        'detailtrigram',
-                        'plagiarism_docguard',
-                        round($sig['unique_ratio'] * 100)
-                    );
-                }
-                if (isset($sig['uniform_ratio']) && $sig['uniform_ratio'] !== null) {
-                    $detailparts[] = get_string(
-                        'detailuniformstarts',
-                        'plagiarism_docguard',
-                        round($sig['uniform_ratio'] * 100)
-                    );
-                }
-                if (isset($sig['ttr'])) {
-                    $detailparts[] = get_string('detailttr', 'plagiarism_docguard', $sig['ttr']);
-                }
-                if (isset($sig['note'])) {
-                    $detailparts[] = $sig['note'];
-                }
-
-                $detailhtml = implode('<br>', array_map('s', $detailparts));
-                if ($desc) {
-                    $detailhtml .= '<div style="margin-top:3px;color:#9ca3af;font-size:0.78rem;">' . s($desc) . '</div>';
-                }
-
-                echo '<tr>';
-                echo '<td class="' . ($frd ? 'docguard-signal-fired' : 'docguard-signal-silent') . '">' . s($lbl) . '</td>';
-                echo '<td>' . $statushtml . '</td>';
-                echo '<td>';
-                if ($frd) {
-                    echo '<strong>' . $pts . '</strong> / ' . $max;
-                } else {
-                    echo '0 / ' . $max;
-                }
-                echo '</td>';
-                echo '<td>' . $detailhtml . '</td>';
-                echo '</tr>';
-            }
-            echo '</tbody></table>';
-        } else {
-            // FIX-DG-EMPTY-BREAKDOWN-MSG (v1.0.78): analyser::score_section() returns
-            // an empty signal set for any section under 8 recognised words, and
-            // records the reason as a section-level 'insufficient_text' note that was
-            // never rendered anywhere. State the reason instead of showing a blank card.
-            echo '<p style="color:#9ca3af;font-style:italic;font-size:0.85rem;">'
-                . get_string('nosignals', 'plagiarism_docguard') . '</p>';
+        if (($dgscope['note'] ?? '') === 'mostly_not_own_prose') {
+            echo '<p style="background:#fffbeb;border-left:3px solid #f59e0b;'
+                . 'padding:0.55rem 0.8rem;margin:0.4rem 0;font-size:0.84rem;'
+                . 'color:#78350f;line-height:1.55;">'
+                . get_string('nosignalsquoted', 'plagiarism_docguard',
+                    (int)($dgscope['excluded'] ?? 0))
+                . '</p>';
         }
 
         echo '</div></div>';
@@ -550,6 +479,23 @@ if (strlen((string)$sub->normtext) > 100) {
         );
     }
 
+    /*
+     * V1.0.93: state the copying result as its own finding, in words, before the table.
+     *
+     * The AI-writing score at the top of this page and the copying check down here answer
+     * two different questions, and the page previously ran them together under one "risk"
+     * heading. This is the only part of DocGuard that compares the submission against
+     * anybody else's work, so it gets its own plain-language verdict rather than being
+     * left for the teacher to infer from an empty table.
+     */
+    echo '<p style="font-weight:600;font-size:0.9rem;margin:0 0 0.5rem;">'
+        . s(get_string('copycheckheading', 'plagiarism_docguard')) . ': '
+        . '<span style="font-weight:400;">'
+        . (empty($similar)
+            ? s(get_string('copycheckclean', 'plagiarism_docguard'))
+            : s(get_string('copycheckfound', 'plagiarism_docguard', count($similar))))
+        . '</span></p>';
+
     if (empty($similar)) {
         echo '<p style="color:#6b7280;font-style:italic;">'
             . get_string('nosimilaritiesthreshold', 'plagiarism_docguard') . '</p>';
@@ -581,10 +527,22 @@ if (strlen((string)$sub->normtext) > 100) {
         . get_string('insufficienttext', 'plagiarism_docguard') . '</p>';
 }
 
+/* ── Scope note ──────────────────────────────────────────────────────────────── */
+/*
+ * V1.0.93. Placed with the interpretation guide so the two are read together, and worded
+ * so that it answers the question a teacher actually has when they look at a low score:
+ * does this mean the work is original? It does not, and nothing else on this page said so.
+ */
+echo '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:0.9rem '
+    . '1.15rem;margin-top:1.5rem;font-size:0.84rem;line-height:1.55;">';
+echo '<strong>' . s(get_string('scopeheading', 'plagiarism_docguard')) . '</strong><br>';
+echo get_string('scopenote', 'plagiarism_docguard');
+echo '</div>';
+
 /* ── Interpretation guide ────────────────────────────────────────────────────── */
 
 echo '<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:1rem '
-    . '1.25rem;margin-top:2rem;font-size:0.83rem;">';
+    . '1.25rem;margin-top:1.5rem;font-size:0.83rem;">';
 echo '<strong>' . get_string('interpretationguide', 'plagiarism_docguard') . '</strong><br>';
 echo '<ul style="margin:0.5rem 0 0;padding-left:1.25rem;color:#555;">';
 echo '<li>' . get_string('interpretlow', 'plagiarism_docguard') . '</li>';

@@ -536,7 +536,31 @@ class observer {
                 $rec->wordcount     = (int)($sec['wordcount'] ?? 0);
                 $rec->riskscore     = (float)($sec['riskscore'] ?? 0);
                 $rec->risklevel     = (string)($sec['risklevel'] ?? 'low');
-                $rec->signalsjson   = json_encode($sec['signals'] ?? []);
+                /*
+                 * V1.0.94. The scoring scope travels with the signals, under a reserved
+                 * key, so no new column and no upgrade step is needed and rows written by
+                 * earlier versions simply do not carry it.
+                 *
+                 * This has to be stored. score_section() now removes quotations and the
+                 * reference list before measuring, and excluding part of a submission from
+                 * scoring without telling the teacher would be worse than not excluding it
+                 * at all - the teacher would be reading a number about a different document
+                 * from the one in front of them.
+                 */
+                // V1.0.99: always empty - the style signals were removed. The key and
+                // the column are retained so stored rows keep one shape and the scope
+                // metadata below still has somewhere to live.
+                $signalsout = $sec['signals'] ?? [];
+                $excluded   = (int)($sec['excluded_words'] ?? 0);
+                $secnote    = (string)($sec['note'] ?? '');
+                if ($excluded > 0 || $secnote !== '') {
+                    $signalsout['_scope'] = [
+                        'excluded' => $excluded,
+                        'reason'   => (string)($sec['excluded_reason'] ?? ''),
+                        'note'     => $secnote,
+                    ];
+                }
+                $rec->signalsjson   = json_encode($signalsout);
                 $rec->timemodified  = $sectime;
 
                 // Per-row guard: one unstorable section must not cost the teacher the
@@ -634,5 +658,102 @@ class observer {
         }
 
         $DB->update_record('plagiarism_docguard_sub', $update);
+
+        /*
+         * The score is copy evidence, and copy evidence is pairwise. It has to be applied
+         * after the row above is committed, because the comparison reads the other
+         * submissions' stored normtext and this submission has to be visible to the next
+         * one that arrives.
+         */
+        if ($update->status === 'analysed') {
+            self::apply_copy_evidence($subid, $cmid, (string)$update->normtext);
+        }
+    }
+
+    /**
+     * Compare this submission against the others in the activity and record the result.
+     *
+     * V1.0.99 FIX-DG-COPY-EVIDENCE-NEVER-REACHED-THE-SCORE.
+     *
+     * Before this, analyser::compute_s12_score() was dead code - never called anywhere in
+     * the plugin - and cross_student_similarity() ran only when a teacher happened to open
+     * one student's report page, computing every pair again on each page load and storing
+     * nothing. The badge on the submission list came from overall_riskscore, which was a
+     * weighted average of style-signal points.
+     *
+     * The consequence was the wrong way round in both directions. A student who copied
+     * another student's work verbatim carried a LOW badge, because verbatim copying says
+     * nothing about writing style. A second-language student who wrote their own answer
+     * carried 27 of 100, because formal careful prose is what the style signals rank. The
+     * one measurement with evidence behind it - 92% on a genuine copy, 13% on two students
+     * answering the same closed question independently, 0.7% on unrelated topics - was
+     * computed, displayed in a table, and then discarded.
+     *
+     * Both sides of a flagged pair are updated. Copying is symmetric: if B matches A at
+     * 80%, A matches B at 80%, and A was analysed before B existed. Without raising A's
+     * score too, whoever submitted first keeps a clean badge however much of their work
+     * appears in somebody else's. The earlier submission's score is only ever raised,
+     * never lowered, so a later unrelated submission cannot clear an existing match.
+     *
+     * @param int $subid This submission's id.
+     * @param int $cmid The course module.
+     * @param string $normtext This submission's normalised text.
+     * @return void
+     */
+    protected static function apply_copy_evidence(int $subid, int $cmid, string $normtext): void {
+        global $DB;
+
+        try {
+            $matches = \plagiarism_docguard\analyser::cross_student_similarity(
+                $subid,
+                $cmid,
+                $normtext
+            );
+
+            /*
+             * The decision is made by a pure function over plain arrays, in the
+             * analyser, with tests behind it. What is left here is reading the current scores
+             * and writing the new ones - deliberately, because every defect this plugin
+             * shipped and had to withdraw was in code that needed a database to run and
+             * so was never executed by a test.
+             */
+            $otherids = array_values(array_unique(array_map(
+                static fn($m) => (int)$m['subid'],
+                $matches
+            )));
+
+            $existing = [];
+            if (!empty($otherids)) {
+                [$insql, $inparams] = $DB->get_in_or_equal($otherids, SQL_PARAMS_NAMED, 'o');
+                foreach ($DB->get_records_select('plagiarism_docguard_sub',
+                        "id $insql", $inparams, '', 'id, overall_riskscore') as $row) {
+                    $existing[(int)$row->id] = (float)$row->overall_riskscore;
+                }
+            }
+
+            $writes = \plagiarism_docguard\analyser::plan_copy_evidence(
+                $subid,
+                $matches,
+                $existing
+            );
+
+            foreach ($writes as $w) {
+                $DB->set_field('plagiarism_docguard_sub', 'overall_riskscore',
+                    $w['riskscore'], ['id' => $w['subid']]);
+                $DB->set_field('plagiarism_docguard_sub', 'overall_risklevel',
+                    $w['risklevel'], ['id' => $w['subid']]);
+            }
+        } catch (\Throwable $e) {
+            /*
+             * A failure here must not cost the teacher the extraction and the section
+             * breakdown, which are already stored and viewable. The score stays at zero,
+             * which is the honest value for "not yet compared", and Re-analyse retries.
+             */
+            \debugging(
+                'DocGuard: copy comparison failed for submission ' . $subid
+                    . ' — ' . $e->getMessage(),
+                DEBUG_DEVELOPER
+            );
+        }
     }
 }

@@ -1,5 +1,838 @@
 # Changelog
 
+## 1.1.2 - 2026-10-06
+
+**A measurement helper that measured the wrong thing.** Version `2026101500`. No schema
+change.
+
+Found while writing an install-verification script to run on a real Moodle — the script
+produced numbers that did not match the audit, and the script was right to be suspicious.
+
+### `question_parser::similarity()` removed
+
+It wrapped PHP's `similar_text`, a character-level longest-common-substring measure. Copy
+detection has **never** used it — that is `jaccard_sets()` over word bigrams — and the two
+do not agree even approximately:
+
+| Pair | Old helper | Production measure |
+|---|---|---|
+| Independent answers, same question | **54.4%** | **9.8%** |
+| Unrelated topics (control) | **23.0%** | **1.1%** |
+| Identical text | 100% | 100% |
+
+Any two pieces of English prose share most of their characters, so it reported 23%
+similarity between a hand-washing procedure and a paragraph on mitochondria.
+
+**It was never called by production code.** It was called by two tests, and that is the
+damage: `test_a_shared_quotation_is_not_reported_as_copying` — the guard for one of this
+release series' real fixes — was asserting against the wrong measure and passing anyway.
+The test for the fix was not measuring the fix.
+
+Removed rather than renamed, and the test now measures exactly what
+`cross_student_similarity()` measures, with a mutation guard that fails if it drifts back.
+
+### The mutation runner was blind to its own failure
+
+When the checker crashed on the removed function it produced no output — which is
+indistinguishable from "no guard fired". **16 of 17 mutations reported NOT CAUGHT**, and
+the suite reported a catastrophe that was really one stale call.
+
+It now refuses to interpret a crashed checker as a result, and refuses to run at all if the
+unmutated tree already fails a guard.
+
+That second check immediately earned itself: it caught that the explanatory comment left
+behind in `question_parser.php` *quoted* the removed code, so a guard matching on the
+string `similar_text(` matched the comment. Third time in this release series that a guard
+has matched a comment rather than code.
+
+### Verification
+
+17 known-answer checks now run against deployed code on a real Moodle via
+`docguard-verify-install.php`, and reproduce the audit figures: 9.8% independent, 87.1%
+genuine copy, 1.1% control, 57.9% for two answers sharing one long quotation before
+stripping.
+
+## 1.1.1 - 2026-10-06
+
+**Findings from a live site.** Version `2026101400`. No schema change.
+
+A live installation was queried — the first time anything in this plugin has been checked
+against a real site rather than a corpus written for the purpose. Two things came out of it,
+and one of them is a defect no amount of reading the code would have found.
+
+### "Minimum section words" was a dead setting
+
+It was saved, read back, rendered in the settings form, and described to the administrator
+as *"Minimum word count per section to include it in analysis. Sections shorter than this
+are skipped."*
+
+**Nothing in the plugin ever read it.**
+
+It was found because the site had it set to **200** — not the default of 30. Somebody
+configured it deliberately, expecting an effect, and got none.
+
+Removed rather than implemented. Sections are no longer analysed at all — the comparison
+runs on the whole document — so the setting cannot do what it claims, and hiding short
+sections from a marker would be a loss rather than a control. The real behaviour, which the
+setting never governed, is a 40-character minimum per section with a fallback to treating
+the whole document as one section. That is now documented instead of being misdescribed by
+a control that did nothing.
+
+The orphaned config row is left in place rather than deleted, so an administrator
+downgrading does not silently lose a value they set.
+
+### Text retention and copy detection are in direct conflict
+
+Copy detection needs `normtext`. The cleanup task deletes `normtext` after
+`retentiondays` (default 90). **Once it is gone, that submission can never be compared
+again.**
+
+On the site queried: of three analysed submissions, **two had already been pruned**, so one
+was comparable and no pair could be formed at all.
+
+Within a single activity this rarely bites — classmates submit within days of each other. It
+makes **cross-cohort detection impossible by construction**, which is the thing an RTO most
+needs to catch: next year's intake copying this year's work.
+
+Now documented in the README, with the resolution for whenever cross-cohort comparison is
+built: store an irreversible hashed-bigram fingerprint that survives pruning. A fingerprint
+cannot be read back as the student's writing, so it is *better* for privacy than retaining
+the text, and it is all the comparison needs. Nothing in this release implements it.
+
+### Also confirmed on that site
+
+| | |
+|---|---|
+| Installed version | `2026091600` — release **1.0.92**. Nothing from this release series is deployed. |
+| `plagiarism/docguard:viewreport` | Granted to teacher, editingteacher and manager, with no context override blocking it — the 1.0.77 fault is fixed there |
+| Stuck or errored records | None |
+| Orphaned rows | None, in either table |
+| Old score bands | All 3 submissions LOW (max 17) — too few to mean anything |
+
+The upgrade path from `2026091600` was simulated end to end: **nine savepoints,
+monotonically increasing, no duplicates, none re-running a completed step, final savepoint
+equal to `version.php`.**
+
+### What that site could not tell us
+
+Three submissions, one activity, one comparable submission, **zero pairs**. The question
+that decides whether this plugin is usable — how often two real submissions reach 35% — is
+completely untouched by it. That needs a site with real submission volume.
+
+## 1.1.0 - 2026-10-06
+
+**Finishing what 1.0.99 started.** Version `2026101300`. No schema change; nothing in the
+database is altered by the upgrade.
+
+1.0.99 changed what the score means and removed the style signals, but left the old model's
+debris behind — including the text a teacher actually reads.
+
+### The reports were still describing an AI detector
+
+| Where | Said | Now says |
+|---|---|---|
+| Interpretation guide | "Multiple strong AI-writing indicators present" | "Most of this submission's wording also appears in another submission" |
+| Badge tooltip | "HIGH risk (78/100). Significant signals detected" | "78% similar to another submission in this activity. Open both and read them." |
+| Band labels | "High risk" | "High similarity" |
+| Student disclosure | "analysed for indicators of plagiarism and AI-generated writing" | describes the comparison that is actually performed |
+| Privacy metadata | "per-signal findings" | describes what is actually stored |
+| Pair concern labels | "High concern" | "Most wording shared — read both" |
+
+A trainer reading a similarity percentage under a heading about AI-writing indicators was
+being actively misled, and that is the text people act on.
+
+### The same threshold defect, a third time
+
+`report.php` coloured and labelled pairs at **0.70 and 0.50** while the bands are **65 and
+35**. A pair at 60% was labelled the middle tier in the table while its submission was
+banded MEDIUM elsewhere; a pair at 67% was labelled middle while its submission was HIGH.
+
+This is the third appearance of one defect:
+
+1. 1.0.93 — the S12 reporting threshold had drifted from the scoring threshold
+2. 1.0.94 — band literals duplicated out of `band()`
+3. 1.1.0 — these
+
+Every threshold a reader can see now comes from the constants, with a mutation guard that
+reintroduces the literals to prove the test catches them.
+
+### The copy decision is testable now
+
+Which submissions to rescore, and to what, was a dozen `$DB->set_field()` calls inside the
+observer, so no test could execute it. **That is the exact condition that hid both defects
+shipped in 1.0.94.**
+
+It is now `analyser::plan_copy_evidence()` — a pure function over plain arrays, six tests,
+five mutation guards — and the observer holds nothing but the reads and the writes.
+
+The rule most worth a test: a matched submission is **raised only, never lowered**.
+Otherwise a student could clear an existing 90% match by submitting again and matching
+someone else at 40%.
+
+Mutation testing also caught a bad test of my own here: my "takes the highest match" test
+put the highest match **last** in the list, so it passed even if the code took the last one.
+Fixed the fixture, not the mutation.
+
+### 43 tests had never been executed; 57 now run
+
+There is no Moodle in the build environment, so `tests/` had only ever been lint-checked.
+The standalone runner now stubs `set_config`, `get_config`, `make_request_directory`,
+`mtrace`, `DAYSECS` and the task base classes.
+
+**57 pass, 0 failures, 34 honestly skipped** as needing a real Moodle database — reported as
+skipped rather than passed, because a harness must never claim coverage it does not have.
+
+Two failures it surfaced were the harness's own fault, and both were worth fixing: the
+config store persisted between test methods where Moodle's `resetAfterTest()` rolls it back,
+inventing a failure in a test asserting the 90-day retention default; and a silent `mtrace`
+stub swallowed output that a task test captures.
+
+### Copying leads the class report
+
+It used to sit below the submissions table under a column of style scores. It is the only
+check this plugin performs that compares a submission against anything.
+
+Moving it surfaced a regression in the move itself: the user lookup stayed below the block
+that names students, so every name in the copying table would have rendered as `#42`.
+Caught by checking definition order before packaging.
+
+### Legacy rows
+
+The class report counts submissions still carrying a score from the previous model and
+explains them in place. **No bulk rescore button yet** — it needs new task and database
+code, which is the one area of this plugin that has repeatedly shipped defects, so it waits
+for a release that can be verified against a real Moodle. Per-submission **Re-analyse**
+works now, and the copying table is computed fresh from stored text regardless of which
+model scored a submission.
+
+31 orphaned language strings from the deleted signal table were removed. 204 remain, 0
+orphaned, 0 referenced-but-undefined.
+
+### Still not known
+
+No false-positive rate has been measured on real student submissions.
+
+## 1.0.99 - 2026-10-06
+
+**The writing-style signals are removed. Copy evidence becomes the score.**
+
+Version: `2026101200`. No schema change — the existing columns are reused with a new
+meaning, and every analysed row now records which meaning applies to it. No stored data is
+altered by the upgrade.
+
+### Why the signals went
+
+They were tested against **48 answers to real VET assessment prompts generated by three
+different current language models** — Claude, ChatGPT and Gemini, each answering naturally
+and again rewritten to sound like a student who struggles with written English, at
+129–196 words.
+
+| Document class | n | Range | Flagged |
+|---|---|---|---|
+| Genuine machine-written | 48 | **0–14** | **0 of 48** |
+| Human | 11 | 0–27 | 0 of 11 |
+
+**S1, the largest signal at 22 of 84 points, found zero markers in 48 of 48.** The
+highest-scoring document in the whole exercise was a human second-language student essay,
+at nearly twice the highest machine-written document.
+
+They were removed rather than kept on display as unscored observations. Anything shown
+beside a copying verdict is read as corroborating it, which is how institutions came to
+over-rely on detector output in the appeals the OIA upheld in 2025. For a tool that feeds
+misconduct decisions that is a safety problem, not an untidiness.
+
+**1,323 lines came out of `analyser.php`** — 2,014 down to 691.
+
+### Why copy evidence becomes the score
+
+It was already the only measurement with evidence behind it — 92% on a genuine copy, 13% on
+two students answering the same closed question independently, 0.7% on unrelated work — and
+it contributed **nothing**.
+
+- `compute_s12_score()` was dead code. Never called anywhere in the plugin.
+- `cross_student_similarity()` ran only when a teacher happened to open one student's
+  report page, recomputing every pair on each page load and storing nothing.
+- The badge on the submission list came from a weighted average of style-signal points.
+
+So **a student who copied another student verbatim carried a LOW badge**, because verbatim
+copying says nothing about writing style, while a second-language student who wrote their
+own answer carried 27 of 100.
+
+That is now the right way round. The score is the similarity percentage, computed once at
+analysis time and applied to **both sides** of a flagged pair — copying is symmetric, and
+whoever submitted first would otherwise keep a clean badge however much of their work
+appears in someone else's.
+
+The band boundaries need no rescaling:
+
+| Band | Similarity | Measured example |
+|---|---|---|
+| LOW | 0–34% | Independent answers to the same closed question: **13%** |
+| MEDIUM | 35–64% | Read both submissions |
+| HIGH | 65–100% | Genuine copy, light paraphrase: **92%** |
+
+35% is also the threshold that governs whether a pair is listed at all, so the score and the
+pair list cannot disagree.
+
+### Quotation stripping now serves the comparison
+
+It was built to stop the style signals charging a student for an author they quoted. It
+earns its place for a better reason: two students quoting the same legislation share wording
+neither of them wrote.
+
+Measured on two unrelated answers carrying one shared quotation: **47.5% similarity with
+the quotation left in — above the reporting threshold, a false copy match put in front of a
+teacher — and 0.0% with it removed.**
+
+### Legacy rows
+
+Rows written before this release carry no `score_model` stamp. Their score means a
+style-signal sum, which is a different statement from a similarity percentage, so the
+reports **label them** as scored under the previous model rather than silently
+reinterpreting them. Re-analyse rescores a submission under the current model.
+
+### Testing
+
+42 test methods pass with 0 assertion failures. The mutation suite was rewritten for the new
+architecture: 10 reintroduced defects, 10 caught — including one guard that initially missed
+a disabled call because it tested for the method *name*, which the method's own definition
+satisfies.
+
+### Still not known
+
+No false-positive rate has been measured on real student submissions. That is unchanged, and
+it is still what any accuracy claim would require.
+
+## 1.0.98 - 2026-10-06
+
+**Third vendor. Documentation only — no code changes.**
+
+Version: `2026101100`.
+
+Gemini was given the same sixteen VET prompts as Claude and ChatGPT, fresh chat, no mention
+that the output would be tested.
+
+| Document class | n | Range | Flagged |
+|---|---|---|---|
+| Human documents | 11 | 0–27 | 0 of 11 |
+| My hand-written imitations of AI (discredited) | 3 | 37–38 | 3 of 3 |
+| Genuine Claude | 16 | 0–9 | 0 of 16 |
+| Genuine ChatGPT | 16 | 0–14 | 0 of 16 |
+| Genuine Gemini | 16 | 0–14 | 0 of 16 |
+| **All genuine AI, three vendors** | **48** | **0–14** | **0 of 48** |
+
+**S1 found zero markers in 48 of 48.** The highest-scoring document in the whole exercise
+remains a human second-language student essay, at nearly twice the highest machine document.
+
+Three vendors, three different house styles, same result. The style signals do not detect
+current model output.
+
+### S3 is the one exception, and it still has no human baseline
+
+S3 (type-token ratio uniformity across paragraphs) fired on **6 of 16 ChatGPT** documents
+and **11 of 16 Gemini** documents. It is the only style signal responding to genuine model
+output.
+
+No conclusion is drawn from it. Its human baseline is still entirely unmeasured, because
+every document in the human corpus was written as a single unbroken block and S3 splits
+paragraphs on blank lines. Establishing that baseline needs real student submissions with
+paragraph structure, and it is the next measurement worth making.
+
+## 1.0.97 - 2026-10-06
+
+**A second vendor confirms it. Plus another contraction fault.**
+
+Version: `2026101000`. One engine fix (S5).
+
+### ChatGPT, same sixteen prompts
+
+| Document class | n | Range | Flagged |
+|---|---|---|---|
+| Human documents | 11 | 0–27 | 0 of 11 |
+| Genuine Claude output | 16 | 0–9 | 0 of 16 |
+| **Genuine ChatGPT output** | 16 | **3–14** | **0 of 16** |
+| **All genuine AI, both vendors** | **32** | **0–14** | **0 of 32** |
+
+**S1 found zero markers in all 32.** The highest-scoring document in the whole exercise is
+still a human second-language student essay, at 27 — roughly twice the highest machine
+document. This is no longer a one-vendor result.
+
+### S5 was still wrong, in the direction that hurts most
+
+1.0.93 fixed Word's curly apostrophe. It did not fix the writer who types **no apostrophe
+at all**, which is the commoner case in student writing. All six informally-written
+submissions scored 3 of 6 for "contraction absence" while containing up to seven
+contractions — `dont`, `shouldnt`, `thats`, `doesnt`, `cant`, `wouldnt`. The signal
+reported the exact opposite of what was in front of it.
+
+Dropping apostrophes goes with hurried and lower-literacy writing. So the fault made S5
+fire hardest on precisely the students least able to answer the accusation it feeds —
+stacked on the register bias the signal already carries.
+
+Forms that are also ordinary English words (`its`, `were`, `well`, `ill`, `id`, `hes`,
+`shed`, `wed`) are deliberately not matched. Matching them would silence S5 on nearly every
+document, which would be a covert withdrawal rather than a fix.
+
+### Correction: S3 does fire, and the earlier claim was my test data's fault
+
+Earlier releases recorded that S3 "never fires on a real document". That was an artefact of
+the corpus, not a property of S3 — those documents were written as single unbroken blocks,
+and S3 splits paragraphs on blank lines, so it was never measured at all.
+
+Against real ChatGPT output, which arrives in three or four paragraphs, **S3 measured on 16
+of 16 documents and fired on 6**. It is the only style signal showing any response to
+genuine model output.
+
+No conclusion is drawn from that yet: the human baseline for S3 is still entirely
+unmeasured, for exactly the same reason. Establishing it needs human documents with real
+paragraph structure.
+
+## 1.0.96 - 2026-10-06
+
+**Correction: the detection claims in previous releases were measured against a strawman**
+
+Version: `2026100900`. No code changes to the scoring engine. This release exists to
+withdraw a performance claim, because continuing to ship it would be the most harmful
+thing in the package.
+
+### What was wrong
+
+Every release from 1.0.93 onward reported that DocGuard flagged "3 of 3 generated
+documents (lowest 37)" against "0 of 11 human documents (highest 27)", a ten-point margin.
+
+Those three "generated" documents were **written by hand in imitation of AI style**. They
+were composed from the same folklore about how chatbots write — "delve into the
+complexities", "it is important to note", "a multifaceted tapestry" — that the S1 marker
+list was itself built from. The test set and the detector were derived from the same
+assumption, so the measurement was circular. It demonstrated only that the detector finds
+what it was told to look for.
+
+### What genuine model output actually scores
+
+Sixteen answers to real VET assessment prompts were generated by a current language model:
+ten written naturally, six written after asking the model to sound like a struggling
+student, which is what a cheating submission actually looks like. Lengths 129–196 words,
+the realistic range for a VET short answer.
+
+| Document class | n | Range | Flagged MEDIUM+ |
+|---|---|---|---|
+| Human documents | 11 | 0–27 | **0 of 11** |
+| Hand-written imitations of AI (the old test set) | 3 | 37–38 | 3 of 3 |
+| **Genuine model output, natural** | 10 | **0–9** | **0 of 10** |
+| **Genuine model output, evasion-prompted** | 6 | **0–3** | **0 of 6** |
+
+**DocGuard flagged 0 of 16 genuine machine-written documents.** Its highest-scoring human
+document, a second-language student essay, scored 27 — three times the highest genuine
+machine document, which scored 9.
+
+S1, the signal carrying effectively all of the apparent discrimination, found **zero
+markers in all sixteen** genuine model documents. It found up to three in human documents.
+
+### Why
+
+Published work explains it. Kobak et al. (Science Advances, 2025) established the marker
+vocabulary effect at corpus scale and it is real. But Geng & Trotta (arXiv:2502.09606),
+over 1.29M arXiv abstracts, show `delve`, `intricate`, `showcasing`, `realm`, `pivotal`
+and `meticulous` all began **declining from March–April 2024** — exactly when they became
+publicly known as AI tells. Models were tuned away from them and authors stopped using
+them. Marker lists also differ by model within one family: `underscore` appears at 18 per
+million words in GPT-3.5 and 1,365 per million in GPT-4o-mini.
+
+A marker list has a useful life of roughly 12–18 months. DocGuard is shipping a 2024 list.
+
+### What has not changed
+
+S12, cross-student similarity, is unaffected and remains sound: independent answers to the
+same question 13%, a genuine copy 92%, unrelated control 0.7%. It is measured on
+submissions rather than inferred from style, and it is the part of this plugin with
+evidence behind it.
+
+### What a teacher should take from this
+
+A LOW score from DocGuard does not mean a submission was not AI-written. On this evidence
+it is what a genuine AI submission usually produces. The reports already state that the
+plugin holds no external corpus; they now also state that the style signals have not been
+shown to detect current model output.
+
+## 1.0.95 - 2026-10-06
+
+**Defects found by auditing 1.0.94**
+
+Version: `2026100800`. No database schema changes.
+
+Everything in this release is a fault 1.0.94 introduced, found by reviewing that release
+rather than by new measurement. Two of the three had quietly defeated the fix 1.0.94
+existed to make. **Do not deploy 1.0.94.**
+
+### S11 was applied to sections that were never scored
+
+The cross-section signal was distributed over every section, including ones
+`score_section()` had declined to score. A bibliography section was given 10 points on a
+word count of zero.
+
+The worse half: injecting the signal made that section's signal set non-empty, so the
+report rendered a one-row signal table instead of the plain-English explanation that there
+was too little of the student's own prose to measure. VET submissions are
+question-per-section almost by definition, so 1.0.94's headline fix was unreachable on
+close to every real document.
+
+That loop was a dozen lines inside `analyse_file()`, which needs a `stored_file` and a
+database and was therefore never unit tested. It is now `apply_cross_section_signal()`,
+taking and returning plain arrays, so this behaviour is a test rather than a code review.
+
+### Quotation marks were paired by proximity, not position
+
+```
+/"(?:[^"]{15,})"/u
+```
+
+A regex engine scanning left to right will pair a *closing* mark with the next *opening*
+one. On an answer using three short scare-quotes:
+
+```
+kept       "restructure"   "right-sized"   "opportunity"
+stripped   " but everyone knew what that meant. She said the team was being "
+           " and that we should see it as an "
+```
+
+It removed the student's own narration and retained the quoted words — the exact reverse
+of the intent — and silently discarded 20 of 74 words of a realistic answer.
+
+Marks are now paired by position. The threshold is 20 words rather than 15 characters, so
+dialogue, scare-quotes and short lifted phrases all survive while a block quotation long
+enough to carry its author's style is still removed. An unbalanced mark from OCR or a typo
+no longer swallows the rest of the answer.
+
+### Three tests had been failing since 1.0.93, and nothing had run them
+
+There is no Moodle in the build environment, so `tests/` had been lint-checked and never
+executed. A standalone runner now executes every test method that does not need the Moodle
+database, which is how these surfaced:
+
+- `test_short_sections_are_not_scored_on_density` asserted a flat zero below a hard word
+  floor that 1.0.93 had already replaced, in the same release, with a confidence ramp.
+- Two of the five S1 density provider cases were transcribed from the band table instead
+  of measured, and were wrong about which band a density falls in: three phrases in 200
+  words is 18.9 per 1000, below the lowest band, and scores 0 rather than the 5 claimed;
+  ten phrases in 150 words is 89.4 per 1000, a fraction under the 90 the top band needs,
+  and scores 16 rather than 22.
+
+All three now assert measured behaviour against the named constants, and the provider
+records each case's measured density beside its expected points.
+
+76 test methods run and pass. The remaining 43 need Moodle's database, `set_config()` or
+`make_request_directory()` and are still unverified outside CI.
+
+### Consistency
+
+`score_section()` returns the same keys on every path; `lowconfidence` was missing from the
+under-eight-words branch.
+
+### Unchanged
+
+Known-origin figures are the same as 1.0.94: human documents 0 of 11 flagged MEDIUM or
+above (highest 27), generated 3 of 3 flagged (lowest 37). **Superseded — see 1.0.96: those
+three "generated" documents were hand-written imitations and the measurement was circular.
+Genuine model output scores 0–9 and is not flagged.** No document in the known-origin
+set loses a single word to the exclusions. The mutation suite now reintroduces sixteen
+fixed defects and a named test catches each one.
+
+The validation gap is also unchanged, and remains the only thing that matters for an
+accuracy claim: fourteen hand-written documents demonstrate defects, they do not measure a
+false-positive rate.
+
+## 1.0.94 - 2026-10-06
+
+**Signal validity, second round**
+
+Version: `2026100700`. No database schema changes.
+
+1.0.93 fixed the signals that were measuring the wrong thing. This release kept measuring,
+and withdrew or corrected what did not survive it.
+
+### A student is scored on what they wrote
+
+Quotations and the reference list are now removed before the style signals run.
+
+Both directions were wrong. A measured bibliography of eight ordinary VET titles scored 11
+of 22 on S1 — academic titles are written in exactly the register the marker list
+describes, and the student wrote none of those words. A student quoting Boud accurately was
+charged for Boud's "it is important to note". In the other direction, the same reference
+list enlarged the denominator: a generated passage measuring 382 marker hits per 1000 words
+fell to 166 once eight citations were appended. Padding a submission with references was a
+working evasion.
+
+The report states how many words were set aside and why. Excluding part of a submission
+from scoring without telling the teacher would be worse than not excluding it — they would
+be reading a number about a different document from the one in front of them.
+
+A section with almost nothing left after the exclusions is now reported as having too
+little of the student's own prose to measure. It is neither scored as submitted nor filed
+as an empty submission, because a submission that is 95% quotation is a marking question
+and "LOW risk" is the most misleading thing this report could say about it.
+
+Three signals — sentence uniformity, TTR uniformity and sentence-start uniformity — read
+the text with its line breaks intact, and were still being handed the raw submission after
+the stripping was added. They now read the same stripped text as everything else.
+
+### S6 (passive voice) no longer contributes to the score
+
+Once the counting was corrected in 1.0.93, the signal was measurable, and it ran backwards.
+
+```
+Passive ratio, 14 documents of known origin
+generated   0.000  0.006  0.007
+human       0.000  0.000  0.006  0.009  0.015  0.017  0.018  0.019  0.042  0.118  0.135
+```
+
+The three generated essays are the least passive documents in the set. Of the eleven human
+documents, the three that cleared the old threshold were a policy document, a lab report
+and a nursing clinical answer — each a register in which the passive is the required house
+style. The signal awarded points to 3 of 11 human documents and 0 of 3 generated ones.
+Every point it ever contributed went to a person writing correctly for their profession.
+
+The premise came from pre-LLM readability checkers, where passive voice marks heavy prose.
+It was never evidence about chatbot output, and current chatbots write in a conspicuously
+active voice. No choice of threshold fixes a signal pointing the wrong way, so it was
+withdrawn rather than rebanded. The measurement is still shown, as an observation worth
+nothing, because passive density describes a piece of writing even though it says nothing
+about who wrote it.
+
+### A short section is not a clean result
+
+A section under 150 words is now marked as not measurable rather than reported as low risk.
+Every signal here is a rate or a distribution, so a short section does not produce a little
+evidence — it produces none.
+
+```
+Score of the same text, truncated
+                   25w   50w   80w  150w  full
+generated essay 1    8     7    10    33    37
+generated essay 2    5     5     8    34    38
+generated essay 3    5     8    14    38    38
+```
+
+No document in the set scored materially higher truncated than whole, so a short section
+can fail to flag but cannot falsely flag. That makes the reassuring reading the dangerous
+one, and a teacher who reads "LOW" on a sixty-word answer as a clear result has been misled
+by this plugin.
+
+### The scale is stated honestly
+
+The report displays a section score against 100, but S1–S10 total 84 attainable points
+(S11 adds 10 only where a submission has several sections to compare). "26/100" sounds like
+a quarter of the available evidence; it is nearer a third. The figure is now a constant with
+a test behind it, so a future change to any signal's maximum has to update it and the README
+together. The band thresholds followed the S12 threshold into named constants for the same
+reason: duplicated numbers drift, and that is how the class report came to name pairs to a
+teacher that the engine scored at zero.
+
+### Effect on the known-origin set
+
+| | 1.0.92 | 1.0.93 | 1.0.94 |
+|---|---|---|---|
+| Human documents flagged MEDIUM+ | 2 of 11 | 0 of 11 | 0 of 11 |
+| Highest-scoring human document | 49 | 27 | 27 |
+| Generated documents flagged | 3 of 3 | 3 of 3 | 3 of 3 |
+| Lowest-scoring generated document | 37 | 37 | 37 |
+| Nursing clinical answer | 23 | 15 | 9 |
+| Lab report | 12 | 12 | 6 |
+| Policy / management prose | 33 | 14 | 8 |
+| Reference list scored as prose | 11 | 11 | not scored, and said so |
+
+The professional-register documents fell with no change to any generated document, which is
+the shape a register bias leaving the score should have.
+
+### Testing
+
+`tests/signal_validity_test.php` carries eight further requirement tests: reference lists
+not scored as prose, quotations excluded, appended references not diluting an unchanged
+score, the line-shaped signals reading the stripped text, short sections marked, band
+thresholds and the attainable maximum coming from shared constants, and scoring metadata
+never rendered as a signal. The mutation suite now reintroduces thirteen fixed defects and
+confirms a named test catches each one.
+
+### Still outstanding
+
+Fourteen hand-written documents demonstrate a defect; they do not measure a false-positive
+rate, and nothing in this release changes that. A blind validation set of several hundred
+real submissions of known provenance, including second-language writing, remains the
+prerequisite for any accuracy claim about this plugin. The bands for the remaining signals
+are fitted to that same small set.
+
+## 1.0.93 - 2026-10-06
+
+**Signal validity**
+
+Version: `2026100600`. No database schema changes.
+
+This release came out of running the scoring engine against texts whose origin is known —
+public-domain prose written a century before language models, the registers our customers
+actually submit, and generated passages. The result was that a second-language student
+essay scored 49 and a VET policy answer 43, while an actual generated essay scored 37. The
+tool was ranking writing register, not authorship, and the signal carrying the most weight
+was the main reason.
+
+### What the reports now say
+
+DocGuard holds no external corpus: it does not check the web, published sources, essay
+banks, other courses or previous cohorts. The only comparison against other work is with
+submissions to the same activity. A teacher reading a LOW score had no way to know that,
+and would reasonably conclude the work had been checked against sources and come back
+clean.
+
+The student report now carries a "What was checked" panel stating this plainly, the class
+report carries a one-line version next to the scores, and the headline band is labelled
+**AI-writing indicators** rather than presented as an unqualified risk score. The
+interpretation guide no longer describes a LOW score as "consistent with authentic student
+writing".
+
+Every style signal now states its own limits in its description — that formal register,
+the taught essay template and second-language writing raise these scores for reasons
+unrelated to how the work was produced.
+
+### S1 — AI marker vocabulary (22 points, the heaviest signal)
+
+Four separate defects, all inflating the score:
+
+- **23 of the 125 entries were ordinary English**: `in order to`, `in conclusion`,
+  `foster`, `robust`, `stakeholder`, `essentially`, `ultimately`, `landscape`, `paradigm`,
+  `firstly`..`lastly`. One sentence of unremarkable workplace prose matched ten entries and
+  scored the full 22 of 22.
+- **19 entries were substrings of other entries**, so one word scored twice — `foster`
+  inside `fostering`, `stakeholder` inside `key stakeholders`.
+- **Four entries were also scored by S4** as transition words, so the same `furthermore`
+  was paid for twice in the total.
+- **Ten entries were also scored by S7** as the intro/conclusion template — `this essay
+  will`, `in conclusion`, `in summary` and the rest. The same double-counting, with a
+  different signal, and it survived the first pass at this fix.
+
+The list is now 51 curated entries, matched on word boundaries rather than by `strpos()`.
+Scoring is by **density per 1000 words**, not by how many distinct markers appear
+anywhere: the old method meant a 2,000-word assignment scored higher than a 200-word one
+for being longer, and it computed a density figure that it then never used.
+
+Bands are fitted to measured densities. After the double-counting was removed, human
+writing in the sample ranged from 0 to 30 per 1000 and generated prose from 103 to 179;
+the top band sits well above the highest human reading observed. S1 also requires at least three weighted hits, and scales its result by how much text the
+density was computed from — nothing below 80 words, full weight from 150 — because a
+density on a short answer is unstable and a hard word floor produces a cliff. Two earlier
+attempts at this used a floor, and both had one: identical writing scored 0 and 16 either
+side of 60 words, then 0 and 22 either side of 100. Scoring a student differently because
+their answer ran one word longer is not defensible to that student. The largest single-word
+change is now 5 points, which is a band boundary and inherent to banded scoring.
+
+### S5 — absence of contractions
+
+Matched `don't` with an ASCII apostrophe. Word, Google Docs and most PDF producers
+substitute U+2019 automatically, so on a real submission no contraction was ever found and
+the signal awarded its full six points for their absence to text that was full of them.
+Identical text scored 0 of 6 typed one way and 6 of 6 typed the other. Apostrophes are
+normalised before matching.
+
+### S6 — passive voice
+
+The pattern was `(was|were|is|are|been|be|being)\s+\w+(ed|en)`, which treats any word
+ending in -ed or -en as a past participle. It scored "the door is open", "there are seven
+students", "he was keen to help", "this is often the case" and "the women are children of
+the village" as passive voice, while missing "mistakes were made", "the city was built"
+and "it gets destroyed". It was close to unrelated to the feature it named.
+
+Replaced with a token scan: an auxiliary, then up to two skippable words, then a word that
+passes a real participle test — a regular -ed/-en form that is not one of the common
+adjectives, numerals and plural nouns sharing those endings, or a known irregular
+participle.
+
+The intermediate words matter. A first attempt at this fix used a single regex and lost
+**every progressive passive** — "the policy is being reviewed", "the samples were being
+analysed" — because the pattern consumed "is being" and "being" is not a participle. Those
+are the commonest passives in exactly the clinical and policy registers this signal is read
+in, and the same blindness applied to any adverb: "was carefully recorded", "is widely
+used". Verified against 26 phrases in both directions (12 that must not count, 14 that must).
+
+### S3 — vocabulary richness across paragraphs
+
+`pdftotext` returns one newline per line of the original rather than a blank line between
+paragraphs, so on a PDF this signal saw one paragraph and could not run — and reported that
+as 0 of 8, indistinguishable from a document that had been measured and found
+unremarkable.
+
+A fallback splitting on single newlines was built and then removed. It did not work:
+pdftotext lines are 8 to 18 words, below the 20-word gate, so it never engaged on the
+format it targeted. Where lines *were* long enough it did engage, and chopping continuous
+prose into equal-length fragments produces type-token ratios that are mechanically
+uniform — awarding a full 8 of 8 for "suspicious consistency" to any document it touched,
+human or not. Inventing paragraph boundaries invents the measurement.
+
+The signal now reports that it could not measure, and the report says so. An honest "not
+measured" is worth more to a teacher than a fabricated zero.
+
+### S12 — cross-student similarity
+
+The class report listed pairs from 0.30 under a heading about academic misconduct while
+`compute_s12_score()` awarded nothing below 0.35, so a pair at 0.31 was named to a teacher
+as a concern the engine scored at zero. One constant, `S12_REPORT_THRESHOLD`, now governs
+collection, scoring and display.
+
+S12 itself was found to be sound and is otherwise unchanged: two independent answers to the
+same procedural question measure 13% similarity, a genuine copy with light paraphrase 92%,
+unrelated topics 0.7%.
+
+### Measured effect
+
+Same eleven human texts and three generated ones, before and after:
+
+| | Before | After |
+|---|---|---|
+| Highest-scoring human text | 49 (MEDIUM) | 27 (LOW) |
+| Second-language student essay | 49 (MEDIUM) | 27 (LOW) |
+| VET policy answer | 43 (MEDIUM) | 26 (LOW) |
+| Generated essays | 37–41 (MEDIUM) | 37–41 (MEDIUM) |
+| Human texts reaching MEDIUM | 2 of 11 | 0 of 11 |
+| Generated texts reaching MEDIUM | 3 of 3 | 3 of 3 |
+| Largest single-word change in S1 | 16 points | 5 points |
+
+The margin between the highest human text (27) and the lowest generated one (37) is ten
+points. Before, the ordering was inverted: the highest human text scored 49 against a
+lowest generated text of 37, so the tool ranked a second-language student as more
+suspicious than a chatbot.
+
+### S5 — a second defect the apostrophe fix exposed
+
+Contractions were matched with `strpos()`, so "it's" matched inside "unit's" — and audit's,
+credit's, deficit's, permit's, benefit's, all ordinary in VET and policy prose. Before the
+apostrophe fix this was unreachable, because Word's U+2019 meant nothing matched at all;
+normalising the apostrophes made it live. Now matched on word boundaries, as S1 already
+was.
+
+### Tests
+
+`tests/signal_validity_test.php` states each of these as a requirement rather than
+recording current output, so none can return unnoticed: no ordinary English in the marker
+list, no overlapping entries, no word scored by both S1 and S4 or by both S1 and S7,
+markers matched as whole words, contractions found with either apostrophe, possessives not
+read as contractions, the passive detector correct in both directions, an unmeasurable
+document reported as unmeasured rather than zero, short sections not scored on density,
+generated prose scoring above taught formal writing, length not inflating the score, and
+one shared threshold for S12 — asserted against report.php's source so the literal cannot
+drift back.
+
+Each of these was checked by reintroducing the bug it guards and confirming the suite goes
+red. Two of the guards did not discriminate on the first attempt — their fixtures could not
+tell the fixed code from the broken code — and were replaced with ones that do. A test that
+cannot fail is worse than no test, because it reports a guarantee that is not there.
+
+### Still outstanding
+
+The style signals continue to respond to register. The bands were fitted against fourteen
+texts, which is enough to remove the defects above and nowhere near enough to quote an
+accuracy figure. Three known weaknesses remain, measured and unfixed: a reference list or
+bibliography scores highly because entry titles are short and phrase-dense; quoted material
+is attributed to the student, since nothing strips quotations; and S6's own bands were not
+re-fitted after its counting method changed in both directions. A validation set of several hundred submissions of
+known provenance, including second-language writing, scored blind, is the next piece of
+work and should precede any accuracy claim in the listing.
+
 ## 1.0.92 - 2026-09-16
 
 **Moodle Marketplace review MMRT-179**

@@ -39,107 +39,42 @@ namespace plagiarism_docguard;
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class analyser {
-    /* ── AI Marker Vocabulary ─────────────────────────────────────────────────── */
+    /* ── Thresholds ───────────────────────────────────────────────────────────── */
 
     /**
-     * Words and phrases that occur far more often in generated prose than in student writing.
+     * Similarity at or above which a pair of submissions is both scored and reported.
      *
-     * signal_ai_markers() (S1) counts occurrences of each entry, so the list must stay free
-     * of duplicates — a repeated entry is counted twice for a single occurrence in the text.
-     *
-     * @var string[]
+     * V1.0.93. report.php used to list pairs from 0.30 while the scoring function awarded
+     * nothing below 0.35, so the class report named pairs to a teacher, under a heading
+     * about academic misconduct, that the engine itself scored at zero. One constant
+     * serves both.
      */
-    const AI_MARKERS = [
-        'delve', 'delving', 'delved',
-        'it is important to note', "it's important to note",
-        'it is worth noting', "it's worth noting",
-        'it is crucial', 'it is essential', 'it is vital',
-        'certainly', 'crucially', 'fundamentally', 'essentially', 'ultimately',
-        'leverage', 'leveraging', 'leveraged',
-        'utilize', 'utilise', 'utilizing', 'utilising',
-        'in conclusion', 'in summary', 'to summarize', 'to summarise', 'in closing', 'to conclude',
-        'furthermore', 'moreover', 'additionally', 'consequently',
-        'in today\'s world', 'in today\'s society', 'in modern times', 'in the modern era',
-        'a comprehensive', 'a holistic', 'a nuanced',
-        'robust', 'multifaceted', 'intricate complexities', 'complexities',
-        'navigating', 'streamline', 'streamlining', 'transformative', 'innovative',
-        'groundbreaking', 'cutting-edge', 'state-of-the-art',
-        'best practices', 'key takeaways', 'actionable insights', 'actionable',
-        'this essay will', 'this paper will', 'this report will', 'this assignment will',
-        'in the realm of', 'in the context of', 'in the field of',
-        'it goes without saying', 'needless to say',
-        'undoubtedly', 'unequivocally',
-        'henceforth', 'thereupon', 'aforementioned',
-        'as previously mentioned', 'as stated above', 'as discussed above',
-        'plays a crucial role', 'plays a vital role', 'plays an important role',
-        'it should be noted', 'it must be noted', 'it can be argued',
-        'in order to', 'with regard to', 'with respect to',
-        'shed light on', 'shed light', 'delve deeper',
-        'key stakeholders', 'stakeholder', 'paradigm', 'paradigm shift',
-        'synergy', 'synergies', 'ecosystem', 'landscape',
-        'empower', 'empowering', 'empowers',
-        'foster', 'fostering', 'fosters',
-        'proactive', 'proactively',
-        'seamless', 'seamlessly',
-        'at its core', 'at the core',
-        'moving forward', 'going forward',
-        'harness', 'harnessing', 'harnessed',
-        'unlock', 'unlocking', 'unlocks',
-        'resonate', 'resonates', 'resonating',
-        // V1.0.84 FIX-DG-MARKER-DUPLICATE: 'landscape' was listed twice (also at the
-        // 'synergy/ecosystem' line above). signal_ai_markers() walks this list with
-        // strpos(), so ONE occurrence of the word in a student's text was counted as two
-        // distinct markers and shown to the teacher twice - and that single duplicate
-        // was enough to move the signal from the one-marker band (3 points) to the
-        // two-marker band (8). Deduplicated here rather than in the loop so the list
-        // stays the single source of truth.
-        'journey', 'tapestry',
-        'firstly', 'secondly', 'thirdly', 'fourthly', 'lastly',
-        'overall', 'in essence', 'in brief',
-    ];
+    const S12_REPORT_THRESHOLD = 0.35;
 
     /**
-     * Formal connectors whose density signal_transitions() (S4) measures per 100 words.
+     * Lower bounds of the MEDIUM and HIGH bands on the 0-100 score.
      *
-     * Counted with substr_count() per entry, so duplicates inflate the rate — see the
-     * FIX-DG-TRANSITION-DUPLICATE note below.
-     *
-     * @var string[]
+     * Since v1.0.99 the score is a similarity percentage, so these are similarity
+     * thresholds and they sit where the measurements put them: two students answering the
+     * same closed procedural question independently measured 13%, a genuine copy with
+     * light paraphrase 92%, two submissions on unrelated topics 0.7%.
      */
-    const TRANSITION_WORDS = [
-        'furthermore', 'moreover', 'additionally', 'however', 'therefore',
-        'thus', 'hence', 'consequently', 'accordingly', 'subsequently',
-        'in addition', 'as a result', 'in contrast', 'on the other hand',
-        'nevertheless', 'nonetheless', 'notwithstanding', 'alternatively',
-        // V1.0.84 FIX-DG-TRANSITION-DUPLICATE: 'meanwhile' was listed twice.
-        // signal_transitions() sums substr_count() per entry, so one "Meanwhile" in a
-        // student's text counted as two connectors and appeared twice in the hits shown
-        // to the teacher. In a 51-word section that doubled the rate from 1.96 to 3.92
-        // per 100 words, crossing the 3.0 threshold and awarding 5 points that a single
-        // connector should not earn.
-        'conversely', 'meanwhile', 'similarly', 'likewise',
-        'in particular', 'specifically', 'notably', 'evidently', 'clearly',
-    ];
+    const BAND_MEDIUM = 35;
+
+    /** @var int Lower bound of the HIGH band. */
+    const BAND_HIGH = 65;
 
     /**
-     * Everyday contractions whose absence signal_contractions() (S5) treats as a signal.
+     * Shortest quotation, in words, removed before a submission is compared with others.
      *
-     * @var string[]
+     * Two students who quote the same source at length will share that wording without
+     * either copying the other, and the quotation is nobody's own writing. Removing long
+     * quoted spans before comparison means the similarity figure describes the students'
+     * own prose. Short quotations, scare-quoted terms and dialogue are left alone - they
+     * cannot move the measure and they are the student's own writing in the sense that
+     * matters.
      */
-    const CONTRACTIONS = [
-        "don't", "doesn't", "didn't", "can't", "won't", "wouldn't", "couldn't",
-        "shouldn't", "isn't", "aren't", "wasn't", "weren't", "haven't", "hasn't",
-        "hadn't", "it's", "that's", "there's", "they're", "we're", "i'm", "i've",
-        "i'll", "i'd", "you're", "you've", "you'll", "he's", "she's", "they've",
-        "we've", "we'll", "let's", "what's", "who's", "how's",
-    ];
-
-    /**
-     * Sentence openers signal_uniform_starts() (S9) counts when judging opener variety.
-     *
-     * @var string[]
-     */
-    const UNIFORM_STARTS = ['the ', 'it ', 'this ', 'in ', 'for ', 'there ', 'these '];
+    const QUOTE_MIN_WORDS = 20;
 
     /* ── Public API ───────────────────────────────────────────────────────────── */
 
@@ -152,7 +87,7 @@ class analyser {
      * @param int $submissionid Id of the {plagiarism_docguard_sub} row this analysis
      *                              belongs to, used to exclude the submission from its own
      *                              cross-submission comparison.
-     * @return array Result record with keys status ('ok' or 'error'), overall_riskscore,
+     * @return array Result record with keys status ('analysed' or 'error'), overall_riskscore,
      *               overall_risklevel, sections (per-section scoring), analysisjson (the
      *               serialised detail stored on the submission row), normtext (the
      *               normalised extracted text) and error (message when status is 'error').
@@ -233,44 +168,71 @@ class analyser {
             ];
         }
 
-        // Score each section individually.
+        // Describe each section: the student's own prose, and how much of it there is.
         $scoredsections = [];
         foreach ($sections as $sec) {
             $result = self::score_section($sec['text']);
             $scoredsections[] = array_merge($sec, $result);
         }
 
-        // S11: Cross-section style inconsistency.
-        if (count($scoredsections) >= 2) {
-            $s11 = self::signal_cross_section_inconsistency($scoredsections);
-            // Distribute S11 points equally across sections.
-            foreach ($scoredsections as &$sec) {
-                $sec['signals']['s11_cross_section'] = $s11;
-                $sec['riskscore'] = min(100, $sec['riskscore'] + $s11['points']);
-                $sec['risklevel'] = self::band($sec['riskscore']);
-            }
-            unset($sec);
-        }
-
-        // Overall score = weighted average (longer sections weigh more).
-        $totalweight = 0;
-        $totalscore  = 0;
-        foreach ($scoredsections as $sec) {
-            $w = max(1, $sec['wordcount']);
-            $totalscore  += $sec['riskscore'] * $w;
-            $totalweight += $w;
-        }
-        $overallscore = $totalweight > 0 ? round($totalscore / $totalweight, 2) : 0;
+        /*
+         * V1.0.99. The submission score is no longer a weighted average of section
+         * scores, because sections no longer carry a score - the style signals they are
+         * built from do not separate machine-written text from human writing and have
+         * stopped contributing points. See the note in score_section().
+         *
+         * The score is now copy evidence, and copy evidence is pairwise: it is not
+         * knowable from this document alone. analyse_file() therefore returns zero here
+         * and the caller sets the real score once the submission has been compared
+         * against the others in the activity - see observer::apply_copy_evidence().
+         *
+         * Leaving it at zero is deliberate. A submission that has been extracted and
+         * sectioned but not yet compared has no evidence against it, and zero is the
+         * honest value for that state.
+         */
+        $overallscore = 0;
         $overalllevel = self::band($overallscore);
 
-        // Normalised text for cross-student similarity.
-        $norm = question_parser::normalise_for_similarity($text);
+        /*
+         * Normalised text for cross-submission comparison.
+         *
+         * V1.0.99. Quotations and the reference list are removed first. This machinery was
+         * written to stop the style signals charging a student for an author they quoted;
+         * with those signals gone it earns its place for a better reason.
+         *
+         * Two students who quote the same source at length share that wording without
+         * either copying the other, and the quotation is neither student's writing. A
+         * class working from the same unit materials, quoting the same legislation or the
+         * same textbook passage, would otherwise show a similarity figure driven by text
+         * nobody in the room wrote. Removing long quoted spans first means the number
+         * describes the students' own prose, which is the thing in question.
+         *
+         * A shared reference list has the same effect and is removed for the same reason.
+         * Short quotations and scare-quoted terms are left alone: they cannot move the
+         * measure, and they are the student's own writing in the sense that matters.
+         */
+        $forcomparison = self::prepare_for_scoring($text);
+        $norm          = question_parser::normalise_for_similarity($forcomparison['text']);
 
         $analysis = [
             'section_count'    => count($scoredsections),
             'overall_score'    => $overallscore,
             'overall_level'    => $overalllevel,
             'extraction_chars' => strlen($text),
+            /*
+             * V1.0.99. What the stored score MEANS, stamped on the row.
+             *
+             * Model 1, every release to 1.0.98, was a weighted average of style-signal
+             * points - an inference about how the document was written. Model 2 is the
+             * percentage of this submission that appears in another submission to the
+             * same activity - a measurement a teacher can check by opening both.
+             *
+             * The two are not comparable, and 26 under model 1 is a different statement
+             * from 26 under model 2. Rows already in the database carry no stamp, so the
+             * reports label them as scored under the previous model rather than silently
+             * reinterpreting them. Re-analyse rescores a submission under model 2.
+             */
+            'score_model'      => self::SCORE_MODEL,
         ];
 
         return [
@@ -289,591 +251,259 @@ class analyser {
     }
 
     /**
-     * Score a single text section across signals S1–S10.
+     * Describe one section of a submission: its own prose, and how much of it there is.
      *
-     * @param string $text The section text to score.
-     * @return array riskscore (0-100), risklevel, wordcount, signals (keyed S1-S11), and
-     *               for sections under 8 words a "note" of "insufficient_text".
+     * V1.0.99. This used to score the section across eleven writing-style signals and
+     * return a 0-100 risk figure. It no longer scores anything, because the signals did
+     * not do what they claimed.
+     *
+     * Measured against 48 answers to real VET assessment prompts generated by three
+     * different current language models - Claude, ChatGPT and Gemini, each answering
+     * naturally and again rewritten to sound like a student who struggles with written
+     * English, 129 to 196 words, the realistic length for a VET short answer:
+     *
+     *   genuine machine-written documents   0 to 14 of 100    0 of 48 flagged
+     *   human documents                      0 to 27 of 100    0 of 11 flagged
+     *
+     * S1, the largest signal at 22 of the 84 attainable points, found zero markers in 48
+     * of 48. The highest-scoring document in the whole exercise was a human
+     * second-language student essay, at nearly twice the highest machine document. The
+     * signals ranked formality and English proficiency, which is the failure mode Liang
+     * et al. (Patterns, 2023) measured at a 61% false-positive rate against non-native
+     * writers, and the published evidence for the individual signals is weak or
+     * contradictory - GPT-4 uses FEWER discourse markers than students (Herbold et al.,
+     * Scientific Reports 2023), and Claude emits contractions at 30,611 per million words
+     * against GPT-3.5's 120.
+     *
+     * They were removed rather than left on display. Anything shown beside a copying
+     * verdict is read as corroborating it, and that is how institutions came to over-rely
+     * on detector output in the cases the OIA upheld in 2025. For a tool that feeds
+     * misconduct decisions, leaving eleven discredited measurements on the page is a
+     * safety problem, not an untidiness.
+     *
+     * What remains is what a marker can actually use: the text that was extracted, the
+     * amount of the student's own prose in it, and what was set aside before comparison.
+     *
+     * @param string $text The section text.
+     * @return array wordcount (of the student's own prose), excluded_words,
+     *               excluded_reason, note ('insufficient_text' or 'mostly_not_own_prose'
+     *               when there is too little to work with), and signals (always empty -
+     *               the key is retained so stored rows and report code keep one shape).
      */
     public static function score_section(string $text): array {
-        $lower  = strtolower($text);
-        $words  = self::words($lower);
-        $wcount = count($words);
+        $prepared = self::prepare_for_scoring($text);
+        $wcount   = count(self::words(\core_text::strtolower($prepared['text'])));
 
+        $note = '';
         if ($wcount < 8) {
+            $note = $prepared['excluded'] > 0 ? 'mostly_not_own_prose' : 'insufficient_text';
+        }
+
+        return [
+            // Retained at zero: the section-level columns still exist and the submission
+            // score comes from copy evidence, which is not knowable per section here.
+            'riskscore'       => 0,
+            'risklevel'       => 'low',
+            'wordcount'       => $wcount,
+            'excluded_words'  => $prepared['excluded'],
+            'excluded_reason' => $prepared['reason'],
+            'note'            => $note,
+            'signals'         => [],
+        ];
+    }
+
+    /* ── Helpers ──────────────────────────────────────────────────────────────── */
+
+
+    /**
+     * Reduce a section to the student's own prose before it is scored.
+     *
+     * Removes, in order: a reference list, and quoted material. See the note in
+     * score_section() for why each distorts the measurement in both directions.
+     *
+     * The original text is untouched — only the copy the signals run on is reduced — so
+     * the student report still shows the teacher everything that was submitted.
+     *
+     * @param string $text The section text as submitted.
+     * @return array{text: string, excluded: int, reason: string} The prose to score, how
+     *         many words were set aside, and why.
+     */
+    private static function prepare_for_scoring(string $text): array {
+        $originalwords = count(self::words(\core_text::strtolower($text)));
+        $reasons       = [];
+
+        $working = self::strip_reference_list($text);
+        if ($working !== $text) {
+            $reasons[] = 'reference list';
+        }
+
+        $afterrefs = $working;
+        $working   = self::strip_quotations($working);
+        if ($working !== $afterrefs) {
+            $reasons[] = 'quoted material';
+        }
+
+        $remaining = count(self::words(\core_text::strtolower($working)));
+        $excluded  = max(0, $originalwords - $remaining);
+
+        /*
+         * If almost nothing of the student's own prose is left, report that rather than
+         * scoring something.
+         *
+         * Two cases reach here and both have the same honest answer. A submission that is
+         * mostly quotation cannot be assessed for writing style, because the style being
+         * measured is somebody else's. A section that is entirely a reference list has no
+         * prose in it at all — and scoring it anyway is how a measured bibliography of
+         * eight ordinary VET titles came to score 11 of 22 on S1, purely because academic
+         * titles are written in the register the marker list describes.
+         *
+         * Returning the original to be scored, which an earlier version of this did, keeps
+         * exactly that false positive. Returning an empty string says what is true: there
+         * is not enough of this student's writing here to measure.
+         */
+        if ($originalwords > 0 && $remaining < 40 && $remaining < $originalwords * 0.5) {
             return [
-                'riskscore' => 0,
-                'risklevel' => 'low',
-                'wordcount' => $wcount,
-                'signals'   => [],
-                'note'      => 'insufficient_text',
+                'text'     => '',
+                'excluded' => $excluded,
+                'reason'   => 'too little of the student\'s own prose to measure: '
+                    . 'this section is mostly quoted or cited material',
             ];
         }
 
-        $signals     = [];
-        $totalscore = 0;
-
-        // S1 — AI marker vocabulary (0–22 pts).
-        $s1 = self::signal_ai_markers($lower, $wcount);
-        $signals['s1_ai_markers'] = $s1;
-        $totalscore += $s1['points'];
-
-        // S2 — Sentence length uniformity (0–10 pts).
-        $s2 = self::signal_sentence_uniformity($text);
-        $signals['s2_sentence_uniformity'] = $s2;
-        $totalscore += $s2['points'];
-
-        // S3 — TTR uniformity across paragraphs (0–8 pts).
-        $s3 = self::signal_ttr_uniformity($text);
-        $signals['s3_ttr_uniformity'] = $s3;
-        $totalscore += $s3['points'];
-
-        // S4 — Formal transition overuse (0–8 pts).
-        $s4 = self::signal_transitions($lower, $wcount);
-        $signals['s4_transitions'] = $s4;
-        $totalscore += $s4['points'];
-
-        // S5 — Contraction absence (0–6 pts).
-        $s5 = self::signal_contraction_absence($lower, $wcount);
-        $signals['s5_contractions'] = $s5;
-        $totalscore += $s5['points'];
-
-        // S6 — Passive voice ratio (0–6 pts).
-        $s6 = self::signal_passive_voice($lower, $wcount);
-        $signals['s6_passive_voice'] = $s6;
-        $totalscore += $s6['points'];
-
-        // S7 — Intro/conclusion template pattern (0–10 pts).
-        $s7 = self::signal_template_pattern($lower);
-        $signals['s7_template'] = $s7;
-        $totalscore += $s7['points'];
-
-        // S8 — Trigram repetition (0–8 pts).
-        $s8 = self::signal_trigram_repetition($words);
-        $signals['s8_trigrams'] = $s8;
-        $totalscore += $s8['points'];
-
-        // S9 — Uniform sentence starts (0–6 pts).
-        $s9 = self::signal_sentence_starts($text);
-        $signals['s9_sentence_starts'] = $s9;
-        $totalscore += $s9['points'];
-
-        // S10 — Vocabulary richness extremity (0–6 pts).
-        $s10 = self::signal_vocab_richness($words, $wcount);
-        $signals['s10_vocab_richness'] = $s10;
-        $totalscore += $s10['points'];
-
-        $totalscore = (int)min(100, $totalscore);
-        $level       = self::band($totalscore);
-
         return [
-            'riskscore' => $totalscore,
-            'risklevel' => $level,
-            'wordcount' => $wcount,
-            'signals'   => $signals,
-        ];
-    }
-
-    /* ── Signal Implementations ──────────────────────────────────────────────── */
-
-    /**
-     * S1 — count phrases from the AI marker vocabulary present in the section.
-     *
-     * Scores 0-22 points on how many distinct markers appear, and reports the ten
-     * matches found so the teacher can see what triggered it.
-     *
-     * @param string $lower The section text, already lower-cased.
-     * @param int $wcount Number of recognised words in the section, used for density.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
-     */
-    private static function signal_ai_markers(string $lower, int $wcount): array {
-        $hits   = [];
-        $count  = 0;
-        foreach (self::AI_MARKERS as $marker) {
-            if (strpos($lower, strtolower($marker)) !== false) {
-                $hits[] = $marker;
-                $count++;
-            }
-        }
-        $density = $wcount > 0 ? ($count / $wcount * 100) : 0;
-        $points  = 0;
-        if ($count >= 7) {
-            $points = 22;
-        } else if ($count >= 5) {
-            $points = 17;
-        } else if ($count >= 3) {
-            $points = 12;
-        } else if ($count >= 2) {
-            $points = 8;
-        } else if ($count === 1) {
-            $points = 3;
-        }
-
-        return [
-            'points'         => $points,
-            'max'            => 22,
-            'marker_count'   => $count,
-            'density_per100' => round($density, 2),
-            'matches'        => array_slice($hits, 0, 10),
-            'label'          => 'AI / LLM marker vocabulary',
-            'description'    => 'Detects phrases and vocabulary statistically overrepresented in ChatGPT/LLM output.',
-            'fired'          => $points > 0,
+            'text'     => $working,
+            'excluded' => $excluded,
+            'reason'   => $reasons ? implode(' and ', $reasons) : '',
         ];
     }
 
     /**
-     * S2 — measure how uniform the sentence lengths are across the section.
+     * Remove a trailing reference list or bibliography.
      *
-     * A low standard deviation of sentence word-counts is characteristic of generated
-     * text; human writing varies sentence length far more.
+     * Two passes, because the two formats fail differently. A heading ("References",
+     * "Bibliography", "Works cited") marks everything after it; where no heading exists,
+     * individual lines are matched against the shape of a citation — an author surname, an
+     * initial, and a year in brackets — which is what APA, Harvard and Chicago share.
+     *
+     * Deliberately conservative: a line is dropped only when it looks like a citation on
+     * its own, so a sentence that merely mentions a year survives.
      *
      * @param string $text The section text.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     * @return string The text with the reference list removed.
      */
-    private static function signal_sentence_uniformity(string $text): array {
-        $sentences = self::split_sentences($text);
-        $lengths   = array_map(fn($s) => count(self::words(strtolower($s))), $sentences);
-        $lengths   = array_filter($lengths, fn($l) => $l > 2);
-        $lengths   = array_values($lengths);
-        $n         = count($lengths);
-
-        if ($n < 4) {
-            return ['points' => 0, 'max' => 10, 'sentence_count' => $n, 'std_dev' => null,
-                    'mean' => null, 'label' => 'Sentence length uniformity', 'fired' => false,
-                    'description' => 'Too few sentences to evaluate (need 4+).'];
-        }
-
-        $mean    = array_sum($lengths) / $n;
-        $variance = array_sum(array_map(fn($l) => ($l - $mean) ** 2, $lengths)) / $n;
-        $stddev = sqrt($variance);
-
-        $points = 0;
-        if ($stddev < 2.0 && $mean > 8) {
-            $points = 10;
-        } else if ($stddev < 3.0 && $mean > 8) {
-            $points = 6;
-        } else if ($stddev < 4.0 && $mean > 8) {
-            $points = 3;
-        }
-
-        return [
-            'points'         => $points,
-            'max'            => 10,
-            'sentence_count' => $n,
-            'mean_words'     => round($mean, 1),
-            'std_dev'        => round($stddev, 2),
-            'label'          => 'Sentence length uniformity',
-            'description'    => 'AI tends to write sentences of near-identical length. Low standard deviation across '
-                . 'sentence word-counts is suspicious.',
-            'fired'          => $points > 0,
-        ];
-    }
-
-    /**
-     * S3 — measure how consistent vocabulary richness is between paragraphs.
-     *
-     * Computes the type-token ratio of each paragraph of 20 or more words and scores
-     * the standard deviation across them. Returns zero points for fewer than two
-     * qualifying paragraphs.
-     *
-     * @param string $text The section text.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
-     */
-    private static function signal_ttr_uniformity(string $text): array {
-        $paras = array_filter(
-            preg_split('/\n{2,}/', $text),
-            fn($p) => str_word_count(trim($p)) >= 20
+    private static function strip_reference_list(string $text): string {
+        // A heading on its own line, with everything following it.
+        $withoutheading = preg_replace(
+            '/^[ \t]*(references|reference list|bibliography|works cited|citations)[ \t:]*$.*/imsu',
+            '',
+            $text
         );
-        $paras = array_values($paras);
-        $n     = count($paras);
-
-        if ($n < 2) {
-            return ['points' => 0, 'max' => 8, 'para_count' => $n, 'ttr_std_dev' => null,
-                    'label' => 'TTR uniformity across paragraphs', 'fired' => false,
-                    'description' => 'Need 2+ paragraphs of 20+ words.'];
+        if ($withoutheading !== null && $withoutheading !== $text) {
+            $text = $withoutheading;
         }
 
-        $ttrs = [];
-        foreach ($paras as $p) {
-            $ws   = self::words(strtolower($p));
-            $ttrs[] = count($ws) > 0 ? count(array_unique($ws)) / count($ws) : 0;
+        // Individual citation-shaped lines: "Surname, A. (2019). Title. Source."
+        $lines = preg_split('/\n/u', $text);
+        if ($lines === false) {
+            return $text;
         }
-        $mean    = array_sum($ttrs) / count($ttrs);
-        $variance = array_sum(array_map(fn($t) => ($t - $mean) ** 2, $ttrs)) / count($ttrs);
-        $stddev  = sqrt($variance);
-
-        $points = 0;
-        if ($stddev < 0.025) {
-            $points = 8;
-        } else if ($stddev < 0.05) {
-            $points = 4;
-        }
-
-        return [
-            'points'      => $points,
-            'max'         => 8,
-            'para_count'  => $n,
-            'ttr_values'  => array_map(fn($t) => round($t, 3), $ttrs),
-            'ttr_std_dev' => round($stddev, 4),
-            'label'       => 'Type-Token Ratio uniformity across paragraphs',
-            'description' => 'Humans vary their vocabulary richness between paragraphs. AI maintains a suspiciously '
-                . 'consistent TTR.',
-            'fired'       => $points > 0,
-        ];
-    }
-
-    /**
-     * S4 — detect over-use of formal academic connectors.
-     *
-     * Counts occurrences of the transition word list and scores the rate per 100 words.
-     *
-     * @param string $lower The section text, already lower-cased.
-     * @param int $wcount Number of recognised words in the section.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
-     */
-    private static function signal_transitions(string $lower, int $wcount): array {
-        $count = 0;
-        $hits  = [];
-        foreach (self::TRANSITION_WORDS as $tw) {
-            $occ = substr_count($lower, $tw);
-            if ($occ > 0) {
-                $count += $occ;
-                $hits[]  = $tw . ' ×' . $occ;
-            }
-        }
-        $per100 = $wcount > 0 ? round($count / $wcount * 100, 2) : 0;
-        $points = 0;
-        if ($per100 >= 4) {
-            $points = 8;
-        } else if ($per100 >= 3) {
-            $points = 5;
-        } else if ($per100 >= 2) {
-            $points = 2;
-        }
-
-        return [
-            'points'      => $points,
-            'max'         => 8,
-            'count'       => $count,
-            'per_100'     => $per100,
-            'hits'        => array_slice($hits, 0, 8),
-            'label'       => 'Formal transition word overuse',
-            'description' => 'AI over-uses academic connectors (furthermore, moreover, consequently, etc.).',
-            'fired'       => $points > 0,
-        ];
-    }
-
-    /**
-     * S5 — detect the complete absence of contractions in a long section.
-     *
-     * Only evaluated for sections of 100 words or more; shorter text cannot support
-     * the inference.
-     *
-     * @param string $lower The section text, already lower-cased.
-     * @param int $wcount Number of recognised words in the section.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
-     */
-    private static function signal_contraction_absence(string $lower, int $wcount): array {
-        if ($wcount < 100) {
-            return ['points' => 0, 'max' => 6, 'found' => [], 'label' => 'Contraction absence', 'fired' => false,
-                    'description' => 'Requires 100+ words.'];
-        }
-        $found = [];
-        foreach (self::CONTRACTIONS as $c) {
-            if (strpos($lower, $c) !== false) {
-                $found[] = $c;
-            }
-        }
-        $points = 0;
-        if (empty($found) && $wcount >= 300) {
-            $points = 6;
-        } else if (empty($found) && $wcount >= 150) {
-            $points = 3;
-        }
-
-        return [
-            'points'      => $points,
-            'max'         => 6,
-            'found'       => $found,
-            'label'       => 'Absence of contractions',
-            'description' => 'Students naturally use contractions in informal writing. Formal AI-generated text often '
-                . 'avoids them entirely.',
-            'fired'       => $points > 0,
-        ];
-    }
-
-    /**
-     * S6 — measure the proportion of passive-voice constructions.
-     *
-     * @param string $lower The section text, already lower-cased.
-     * @param int $wcount Number of recognised words in the section.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
-     */
-    private static function signal_passive_voice(string $lower, int $wcount): array {
-        // Simple heuristic: "was/were/is/are/been/be [word]ed" or "was/were [word]en".
-        $passive = preg_match_all(
-            '/\b(was|were|is|are|been|be|being)\s+\w+(ed|en)\b/',
-            $lower,
-            $m
-        );
-        $ratio = $wcount > 0 ? round($passive / $wcount, 4) : 0;
-        $points = 0;
-        if ($ratio >= 0.04) {
-            $points = 6;
-        } else if ($ratio >= 0.025) {
-            $points = 3;
-        }
-
-        return [
-            'points'       => $points,
-            'max'          => 6,
-            'passive_count' => $passive,
-            'ratio'        => $ratio,
-            'label'        => 'Passive voice overuse',
-            'description'  => 'AI-generated academic text tends to use significantly more passive voice than human writers.',
-            'fired'        => $points > 0,
-        ];
-    }
-
-    /**
-     * S7 — detect templated essay openers and closers.
-     *
-     * Looks for stock opening phrases in the first 300 characters and stock closing
-     * phrases in the last 300 characters of the section.
-     *
-     * @param string $lower The section text, already lower-cased.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
-     */
-    private static function signal_template_pattern(string $lower): array {
-        $openers = [
-            'this essay will', 'this paper will', 'this report will', 'this assignment will',
-            'i will discuss', 'i will explore', 'in this essay', 'in this report',
-            'this essay explores', 'this report explores', 'aims to explore', 'aims to discuss',
-            'the purpose of this', 'the aim of this',
-        ];
-        $closers = [
-            'in conclusion', 'in summary', 'to conclude', 'in closing',
-            'to summarize', 'to summarise', 'in closing,', 'overall,',
-            'as discussed', 'as outlined above', 'having examined',
-        ];
-
-        // Check first 300 chars and last 300 chars.
-        $intro = substr($lower, 0, 300);
-        $outro = substr($lower, -300);
-
-        $foundopener = false;
-        $foundcloser = false;
-        $openerhit   = '';
-        $closerhit   = '';
-
-        foreach ($openers as $o) {
-            if (strpos($intro, $o) !== false) {
-                $foundopener = true;
-                $openerhit = $o;
-                break;
-            }
-        }
-        foreach ($closers as $c) {
-            if (strpos($outro, $c) !== false || strpos($lower, $c) !== false) {
-                $foundcloser = true;
-                $closerhit = $c;
-                break;
+        $kept = [];
+        foreach ($lines as $line) {
+            $iscitation = preg_match(
+                '/^\s*[A-Z][\p{L}\'-]+,\s*[A-Z]\.(\s*[A-Z]\.)*.*\(\d{4}[a-z]?\)/u',
+                $line
+            );
+            if (!$iscitation) {
+                $kept[] = $line;
             }
         }
 
-        $points = 0;
-        if ($foundopener && $foundcloser) {
-            $points = 10;
-        } else if ($foundopener || $foundcloser) {
-            $points = 5;
-        }
-
-        return [
-            'points'       => $points,
-            'max'          => 10,
-            'opener_found' => $foundopener,
-            'closer_found' => $foundcloser,
-            'opener_hit'   => $openerhit,
-            'closer_hit'   => $closerhit,
-            'label'        => 'Intro/conclusion template pattern',
-            'description'  => 'AI consistently adds generic introductory sentences and conclusion paragraphs even to '
-                . 'short answers.',
-            'fired'        => $points > 0,
-        ];
+        return implode("\n", $kept);
     }
 
     /**
-     * S8 — measure word-trigram uniqueness across the section.
+     * Remove quoted material.
      *
-     * Low uniqueness indicates repeated or templated phrasing. Returns zero points
-     * for sections of fewer than 20 words.
-     *
-     * @param string[] $words Tokenised section words, in order, as returned by words().
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
-     */
-    private static function signal_trigram_repetition(array $words): array {
-        $n = count($words);
-        if ($n < 20) {
-            return ['points' => 0, 'max' => 8, 'unique_ratio' => null, 'label' => 'Trigram repetition', 'fired' => false,
-                    'description' => 'Need 20+ words.'];
-        }
-        $trigrams = [];
-        for ($i = 0; $i < $n - 2; $i++) {
-            $tg = $words[$i] . '_' . $words[$i + 1] . '_' . $words[$i + 2];
-            $trigrams[] = $tg;
-        }
-        $total  = count($trigrams);
-        $unique = count(array_unique($trigrams));
-        $ratio  = $total > 0 ? round($unique / $total, 4) : 1.0;
-        $points = 0;
-        if ($ratio < 0.50) {
-            $points = 8;
-        } else if ($ratio < 0.65) {
-            $points = 4;
-        } else if ($ratio < 0.75) {
-            $points = 2;
-        }
-
-        return [
-            'points'       => $points,
-            'max'          => 8,
-            'total'        => $total,
-            'unique'       => $unique,
-            'unique_ratio' => $ratio,
-            'label'        => 'Trigram repetition',
-            'description'  => 'Copy-paste and templated content produces low trigram uniqueness. Authentic writing '
-                . 'has high phrase diversity.',
-            'fired'        => $points > 0,
-        ];
-    }
-
-    /**
-     * S9 — measure how many sentences begin with the same small set of openers.
-     *
-     * Returns zero points for sections of fewer than five sentences.
+     * Handles straight and typographic double quotes, and the long single-quoted spans
+     * some house styles use for block quotations. A span is treated as a quotation only
+     * when it runs to four words or more, so an ordinary scare-quoted term or a quoted
+     * job title is left in the student's prose where it belongs.
      *
      * @param string $text The section text.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     * @return string The text with quoted spans removed.
      */
-    private static function signal_sentence_starts(string $text): array {
-        $sentences = self::split_sentences($text);
-        $n         = count($sentences);
-        if ($n < 5) {
-            return ['points' => 0, 'max' => 6, 'uniform_ratio' => null, 'label' => 'Sentence-start uniformity', 'fired' => false,
-                    'description' => 'Need 5+ sentences.'];
-        }
-        $uniform = 0;
-        foreach ($sentences as $s) {
-            $sl = strtolower(ltrim($s));
-            foreach (self::UNIFORM_STARTS as $starter) {
-                if (strpos($sl, $starter) === 0) {
-                    $uniform++;
-                    break;
+    private static function strip_quotations(string $text): string {
+        /*
+         * V1.0.94 FIX-DG-QUOTE-PAIRING. The first implementation used
+         *     /"(?:[^"]{15,})"/u
+         * which pairs quotation marks by proximity rather than by position, and a regex
+         * engine scanning left to right will happily pair a CLOSING mark with the next
+         * OPENING one. Measured on a submission using three short scare-quotes:
+         *
+         *   kept     "restructure"   "right-sized"   "opportunity"
+         *   stripped " but everyone knew what that meant. She said the team was being "
+         *            " and that we should see it as an "
+         *
+         * It removed the student's own narration and retained the quoted words - the exact
+         * reverse of the intent - and silently discarded 20 of 74 words of a real answer.
+         *
+         * Quotation marks are now paired by position: split on the mark, and the odd-index
+         * segments are the ones inside quotes. Where the marks do not balance, the trailing
+         * segment has no closing mark and is left alone rather than swallowing the rest of
+         * the document - a single stray quote from OCR or a typo must not cost a student
+         * the tail of their answer.
+         */
+        $text = self::strip_paired_spans($text, '"', '"', self::QUOTE_MIN_WORDS);
+        $text = self::strip_paired_spans($text, "\u{201C}", "\u{201D}", self::QUOTE_MIN_WORDS);
+        $text = self::strip_paired_spans($text, "\u{2018}", "\u{2019}", self::QUOTE_MIN_WORDS * 2);
+
+        return $text;
+    }
+
+    /**
+     * Remove spans between paired delimiters, pairing them by position.
+     *
+     * @param string $text The text to process.
+     * @param string $open The opening delimiter.
+     * @param string $close The closing delimiter. May equal $open.
+     * @param int $minwords Only spans of at least this many words are removed.
+     * @return string The text with qualifying spans replaced by a space.
+     */
+    private static function strip_paired_spans(
+        string $text,
+        string $open,
+        string $close,
+        int $minwords
+    ): string {
+        if ($open === $close) {
+            $parts = explode($open, $text);
+            $n     = count($parts);
+
+            // $parts[$i] for odd $i lies between mark $i and mark $i+1. That closing mark
+            // exists only while $i <= $n - 2; the final segment of an unbalanced run has
+            // no closing mark and is not a quotation.
+            for ($i = 1; $i <= $n - 2; $i += 2) {
+                if (count(self::words(\core_text::strtolower($parts[$i]))) >= $minwords) {
+                    $parts[$i] = ' ';
                 }
             }
-        }
-        $ratio = round($uniform / $n, 4);
-        $points = 0;
-        if ($ratio >= 0.65) {
-            $points = 6;
-        } else if ($ratio >= 0.50) {
-            $points = 3;
+
+            return implode($open, $parts);
         }
 
-        return [
-            'points'        => $points,
-            'max'           => 6,
-            'uniform_count' => $uniform,
-            'total'         => $n,
-            'uniform_ratio' => $ratio,
-            'label'         => 'Sentence-start uniformity (perplexity proxy)',
-            'description'   => 'AI often starts many consecutive sentences with "The", "It", "This", "In", etc. — a '
-                . 'low-perplexity pattern.',
-            'fired'         => $points > 0,
-        ];
+        // Distinct delimiters: a span runs from an opening mark to the next closing mark.
+        $pattern = '/' . preg_quote($open, '/') . '([^' . preg_quote($close, '/') . ']*)'
+            . preg_quote($close, '/') . '/u';
+
+        $result = preg_replace_callback(
+            $pattern,
+            fn($m) => count(self::words(\core_text::strtolower($m[1]))) >= $minwords ? ' ' : $m[0],
+            $text
+        );
+
+        return $result ?? $text;
     }
 
-    /**
-     * S10 — flag type-token ratios at either extreme.
-     *
-     * A very high ratio in long text suggests machine polishing; a very low ratio
-     * suggests verbatim copying. Returns zero points below 80 words.
-     *
-     * @param string[] $words Tokenised section words as returned by words().
-     * @param int $wcount Number of recognised words in the section.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
-     */
-    private static function signal_vocab_richness(array $words, int $wcount): array {
-        if ($wcount < 80) {
-            return ['points' => 0, 'max' => 6, 'ttr' => null, 'label' => 'Vocabulary richness extremity', 'fired' => false,
-                    'description' => 'Need 80+ words.'];
-        }
-        $ttr    = round(count(array_unique($words)) / $wcount, 4);
-        $points = 0;
-        // Very high TTR in long text = AI polishing; very low = copying.
-        if ($ttr > 0.90 && $wcount >= 100) {
-            $points = 6;
-        } else if ($ttr > 0.85 && $wcount >= 150) {
-            $points = 3;
-        } else if ($ttr < 0.35 && $wcount >= 150) {
-            $points = 4;
-        } // copy-paste repetition
-
-        return [
-            'points'      => $points,
-            'max'         => 6,
-            'ttr'         => $ttr,
-            'word_count'  => $wcount,
-            'label'       => 'Vocabulary richness extremity',
-            'description' => 'Extremely high Type-Token Ratio in long text suggests AI polish. Very low TTR suggests '
-                . 'verbatim copying.',
-            'fired'       => $points > 0,
-        ];
-    }
-
-    /**
-     * S11 — compare style measurements between the sections of one document.
-     *
-     * Uses the mean sentence length from S2 and the type-token ratio from S10 of each
-     * section; a large spread suggests the sections were not all written the same way.
-     *
-     * @param array $sections Per-section results from score_section(), each with a
-     *                        "signals" sub-array.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
-     */
-    private static function signal_cross_section_inconsistency(array $sections): array {
-        $means    = [];
-        $ttrs     = [];
-        foreach ($sections as $sec) {
-            if (!empty($sec['signals']['s2_sentence_uniformity']['mean_words'])) {
-                $means[] = $sec['signals']['s2_sentence_uniformity']['mean_words'];
-            }
-            if (!empty($sec['signals']['s10_vocab_richness']['ttr'])) {
-                $ttrs[] = $sec['signals']['s10_vocab_richness']['ttr'];
-            }
-        }
-
-        $meanstd = count($means) >= 2 ? self::std_dev($means) : 0;
-        $ttrstd  = count($ttrs) >= 2 ? self::std_dev($ttrs) : 0;
-
-        $points = 0;
-        if ($meanstd > 6 || $ttrstd > 0.15) {
-            $points = 10;
-        } else if ($meanstd > 4 || $ttrstd > 0.10) {
-            $points = 5;
-        }
-
-        return [
-            'points'       => $points,
-            'max'          => 10,
-            'mean_std_dev' => round($meanstd, 2),
-            'ttr_std_dev'  => round($ttrstd, 4),
-            'label'        => 'Cross-section writing style inconsistency',
-            'description'  => 'Large variation in sentence length or vocabulary richness across questions suggests '
-                . 'different sources or authors per question.',
-            'fired'        => $points > 0,
-        ];
-    }
 
     /**
      * Compute cross-student Jaccard similarity between this submission and all others.
@@ -913,7 +543,7 @@ class analyser {
         foreach ($others as $other) {
             $bgb  = question_parser::bigram_set((string)$other->normtext);
             $score = question_parser::jaccard_sets($bga, $bgb);
-            if ($score >= 0.30) {
+            if ($score >= self::S12_REPORT_THRESHOLD) {
                 $matches[] = [$other, $score];
             }
         }
@@ -954,37 +584,117 @@ class analyser {
         return array_slice($results, 0, 10);
     }
 
+
+    /* ── Helpers ─────────────────────────────────────────────────────────────── */
+
     /**
-     * Compute S12 (cross-student) score for a submission given similarity results.
-     * Pure: it reads the highest similarity found and returns the signal record; the
-     * caller is responsible for folding the points into the submission's overall score.
+     * The score for a submission: how similar it is to another submission, as a percentage.
      *
-     * @param float $maxsimilarity The highest similarity found against any other
-     *                              submission in the same activity, 0.0-1.0.
-     * @return array Signal result: points, max, label, description, fired, plus the signal's own measurements.
+     * V1.0.99. This replaces a weighted average of style-signal points, and it is a
+     * different kind of claim. The old number was an inference about how a document was
+     * written. This one is a measurement of how much of it appears in somebody else's
+     * submission to the same activity - which a teacher can check by opening both.
+     *
+     * The percentage is used directly as the 0-100 score, because the existing band
+     * boundaries already sit where the measurements put them:
+     *
+     *   two students answering the same closed procedural question independently   13%
+     *   a genuine copy with light paraphrase                                        92%
+     *   two submissions on unrelated topics                                        0.7%
+     *
+     * So LOW below 35%, MEDIUM from 35%, HIGH from 65% needs no rescaling and no
+     * invented mapping. S12_REPORT_THRESHOLD (35%) is the same number that governs
+     * whether a pair is listed at all, so the score and the pair list cannot disagree.
+     *
+     * @param float $maxsimilarity Highest Jaccard bigram similarity against another
+     *                             submission in the same activity, 0.0 to 1.0.
+     * @return array riskscore (0-100), risklevel, and the similarity it came from.
      */
-    public static function compute_s12_score(float $maxsimilarity): array {
-        $points = 0;
-        if ($maxsimilarity >= 0.75) {
-            $points = 15;
-        } else if ($maxsimilarity >= 0.55) {
-            $points = 8;
-        } else if ($maxsimilarity >= 0.35) {
-            $points = 3;
-        }
+    public static function submission_score(float $maxsimilarity): array {
+        $maxsimilarity = max(0.0, min(1.0, $maxsimilarity));
+        $score         = round($maxsimilarity * 100, 2);
 
         return [
-            'points'         => $points,
-            'max'            => 15,
-            'max_similarity' => $maxsimilarity,
-            'label'          => 'Cross-student submission similarity',
-            'description'    => 'Compares this submission against all other students in the same assignment using '
-                . 'Jaccard bigram similarity.',
-            'fired'          => $points > 0,
+            'riskscore'      => $score,
+            'risklevel'      => self::band($score),
+            'max_similarity' => round($maxsimilarity, 4),
         ];
     }
 
-    /* ── Helpers ─────────────────────────────────────────────────────────────── */
+    /**
+     * Decide which submissions to rescore after a comparison, and to what.
+     *
+     * V1.1.0. This was a dozen lines of $DB->set_field() inside observer, which needs a
+     * database and could therefore not be tested. That is the condition that hid both of
+     * the defects shipped in 1.0.94 - S11 applied to unscored sections, and quotation
+     * marks paired by proximity - so the decision is extracted here as a pure function
+     * over plain arrays, and the observer is left with nothing but the writes.
+     *
+     * Two rules, both of which matter:
+     *
+     *   This submission takes the highest similarity found against it. If it matches
+     *   nobody, that is 0, which is the honest value - no other submission to this
+     *   activity shares significant wording with it.
+     *
+     *   A matched submission is RAISED ONLY. Copying is symmetric: if B matches A at 80%,
+     *   A matches B at 80%, and A may have been analysed before B existed. Without
+     *   raising A too, whoever submitted first keeps a clean badge however much of their
+     *   work turns up in someone else's. But a later, lower match must never pull an
+     *   existing higher one down, or a student could clear a 90% match by submitting
+     *   again - which is both a correctness bug and an invitation.
+     *
+     * @param int $subid The submission just compared.
+     * @param array $matches Each with 'subid' and 'similarity' (0.0-1.0), as returned by
+     *                       cross_student_similarity().
+     * @param array $existingscores Current stored riskscore keyed by submission id, for
+     *                              the matched submissions.
+     * @return array One entry per write to make: subid, riskscore, risklevel.
+     */
+    public static function plan_copy_evidence(int $subid, array $matches, array $existingscores): array {
+        $max = 0.0;
+        foreach ($matches as $m) {
+            $max = max($max, (float)($m['similarity'] ?? 0));
+        }
+
+        $own    = self::submission_score($max);
+        $writes = [[
+            'subid'     => $subid,
+            'riskscore' => $own['riskscore'],
+            'risklevel' => $own['risklevel'],
+        ]];
+
+        $best = [];
+        foreach ($matches as $m) {
+            $otherid = (int)($m['subid'] ?? 0);
+            if ($otherid <= 0 || $otherid === $subid) {
+                continue;
+            }
+            // One write per submission even if it somehow appears twice.
+            $best[$otherid] = max($best[$otherid] ?? 0.0, (float)($m['similarity'] ?? 0));
+        }
+
+        foreach ($best as $otherid => $sim) {
+            $score = self::submission_score($sim);
+            if ($score['riskscore'] > (float)($existingscores[$otherid] ?? 0)) {
+                $writes[] = [
+                    'subid'     => $otherid,
+                    'riskscore' => $score['riskscore'],
+                    'risklevel' => $score['risklevel'],
+                ];
+            }
+        }
+
+        return $writes;
+    }
+
+    /**
+     * Version stamp for the meaning of a stored score.
+     *
+     * 1 = style-signal sum (every release up to 1.0.98). 2 = copy similarity percentage.
+     * Rows carrying no stamp were written under model 1 and are not comparable with model
+     * 2 rows, so the reports label them rather than silently reinterpreting them.
+     */
+    const SCORE_MODEL = 2;
 
     /**
      * Map a 0-100 risk score onto its risk band.
@@ -993,10 +703,10 @@ class analyser {
      * @return string One of "low" (0-34), "medium" (35-64) or "high" (65-100).
      */
     public static function band(float $score): string {
-        if ($score >= 65) {
+        if ($score >= self::BAND_HIGH) {
             return 'high';
         }
-        if ($score >= 35) {
+        if ($score >= self::BAND_MEDIUM) {
             return 'medium';
         }
         return 'low';
@@ -1058,36 +768,5 @@ class analyser {
         return $latin / $letters;
     }
 
-    /**
-     * Split text into sentences on terminal punctuation.
-     *
-     * Fragments of five characters or fewer are discarded as noise.
-     *
-     * @param string $text The text to split.
-     * @return string[] The sentences found, in document order.
-     */
-    private static function split_sentences(string $text): array {
-        return array_values(
-            array_filter(
-                preg_split('/(?<=[.!?])\s+/', $text),
-                fn($s) => strlen(trim($s)) > 5
-                )
-        );
-    }
 
-    /**
-     * Population standard deviation of a list of numbers.
-     *
-     * @param float[] $values The values to measure.
-     * @return float The standard deviation, or 0.0 for fewer than two values.
-     */
-    private static function std_dev(array $values): float {
-        $n = count($values);
-        if ($n < 2) {
-            return 0.0;
-        }
-        $mean = array_sum($values) / $n;
-        $var  = array_sum(array_map(fn($v) => ($v - $mean) ** 2, $values)) / $n;
-        return sqrt($var);
-    }
 }

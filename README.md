@@ -19,22 +19,27 @@
 
 ## What It Does
 
-DocGuard analyses **uploaded assignment documents**. When a student submits a PDF or
-Word file to an assignment where DocGuard is enabled, the plugin extracts the document's
-text, splits it into question/answer sections, and scores each section against twelve
-heuristic signals for indicators of plagiarism and AI-generated writing.
+DocGuard compares **every submission in an activity against every other submission** and
+reports the overlap. When a student submits a PDF or Word file to an assignment where
+DocGuard is enabled, the plugin extracts the text, splits it into question/answer sections,
+removes quotations and the reference list, and measures how much of the remaining prose
+appears in other students' submissions to the same activity.
 
 **All analysis happens on your own Moodle server.** The submitted document is never sent
-anywhere. Text extraction, scoring and the cross-student comparison all run locally
-against your own Moodle database.
+anywhere. Extraction and comparison run locally against your own Moodle database.
 
-Teachers see a risk badge next to each submitted file, a class report listing every
-submission for the activity, and a per-student report showing the signal-by-signal
-breakdown with the evidence behind each score.
+Teachers see a similarity badge next to each submitted file, a class report listing every
+flagged pair, and a per-student report showing the extracted text and which other
+submissions it overlaps with.
 
-DocGuard is a **decision-support tool**. It produces heuristic indicators, not findings
-of misconduct, and every report says so.
+DocGuard is a **decision-support tool**. A similarity figure is a reason to open both
+submissions and read them. It is not a finding of misconduct, and every report says so.
 
+Releases up to 1.0.98 also scored each submission across eleven writing-style signals as an
+AI-writing indicator. Those signals were tested against 48 answers written by three current
+language models and flagged none of them, while the highest-scoring document in the test
+set was a human second-language student. They were removed in 1.0.99. See
+**What DocGuard Checks** below.
 ---
 
 ## Requirements
@@ -144,31 +149,161 @@ non-editing teachers able to see results for the classes they mark.
 
 ---
 
-## Detection Signals
+## Scope — read this first
 
-Each section is scored 0–100 from eleven per-section signals, plus a twelfth
-cross-student signal applied to the submission as a whole.
+DocGuard holds **no external corpus**. It does not search the web, published work, essay
+banks, other courses on your site, previous cohorts, or a student's own earlier
+submissions. The only comparison it makes is with **other submissions to the same
+activity**.
 
-| # | Signal | Max | What it looks for |
-|---|--------|-----|-------------------|
-| S1 | AI / LLM marker vocabulary | 22 | Phrases over-represented in LLM output |
-| S2 | Sentence length uniformity | 10 | Unusually low variation in sentence length |
-| S3 | Type-Token Ratio uniformity across paragraphs | 8 | Vocabulary richness too consistent between paragraphs |
-| S4 | Formal transition word overuse | 8 | Excessive academic connectors per 100 words |
-| S5 | Absence of contractions | 6 | No contractions at all in 100+ words |
-| S6 | Passive voice overuse | 6 | High proportion of passive constructions |
-| S7 | Intro/conclusion template pattern | 10 | Stock opening and closing phrases |
-| S8 | Trigram repetition | 8 | Low word-trigram uniqueness |
-| S9 | Sentence-start uniformity | 6 | Many sentences beginning the same way |
-| S10 | Vocabulary richness extremity | 6 | Type-Token Ratio at either extreme |
-| S11 | Cross-section style inconsistency | 10 | Sections of one document written differently |
-| S12 | Cross-student submission similarity | 15 | Jaccard bigram similarity against other submissions to the same activity |
+| Copying from… | Detected |
+|---|---|
+| Another student in the same activity | **Yes** |
+| A student in another activity, course or cohort | No |
+| The web, a published source, a textbook | No |
+| An essay bank or paper mill | No |
+| The student's own earlier submission | No |
 
-**Risk bands:** 0–34 low · 35–64 medium · 65–100 high.
+**A low score means no other submission to this activity shares significant wording with
+this one. It is not evidence that the work is original**, and it is not evidence that the
+work was written by a person. The reports state this; so should anyone quoting a DocGuard
+score in an academic integrity process.
 
-Signals S1–S10 are English-language heuristics. DocGuard measures how much of a
-document is Latin-script and will not report a confident low score for a document it
-cannot meaningfully analyse.
+---
+
+## What DocGuard Checks
+
+DocGuard performs **one** check: it compares every submission in an activity against every
+other submission, and reports the overlap.
+
+| | What it is | Status |
+|---|---|---|
+| Cross-submission similarity | Jaccard similarity over word bigrams, after quotations and the reference list are removed | **This is the product** |
+| Text extraction | PDF (pdftotext / Ghostscript) and DOCX, with a readability check and a non-Latin-script guard | Supporting |
+
+**Score = similarity percentage.** A submission scored 78 shares 78% of its word pairs with
+another submission to the same activity. The bands sit where the measurements put them:
+
+| Band | Similarity | Measured example |
+|---|---|---|
+| LOW | 0–34% | Two students answering the same closed procedural question independently: **13%** |
+| MEDIUM | 35–64% | Worth reading both submissions |
+| HIGH | 65–100% | A genuine copy with light paraphrasing: **92%** |
+
+An unrelated control pair measured **0.7%**.
+
+Quotations of 20 words or more and the reference list are removed before comparison. Two
+students who quote the same legislation or textbook passage share wording that neither of
+them wrote: measured on two unrelated answers carrying one shared quotation, similarity was
+**47.5% with the quotation left in — above the reporting threshold, a false copy match —
+and 0.0% with it removed.**
+
+### Scope, stated plainly
+
+The comparison covers **submissions to the same activity only**. DocGuard does not check
+the web, published sources, essay banks, other courses, or previous cohorts. A LOW score
+means no other submission to this activity shares significant wording with this one. It
+means nothing else.
+
+### The writing-style signals were removed in 1.0.99
+
+Releases up to 1.0.98 scored each submission 0–100 across eleven writing-style signals —
+marker vocabulary, sentence-length uniformity, transition density, contraction absence,
+passive voice, type-token ratio, trigram repetition, sentence-opener uniformity and others.
+
+They were tested against **48 answers to real VET assessment prompts generated by three
+different current language models** (Claude, ChatGPT and Gemini), each answering naturally
+and again rewritten to sound like a student who struggles with written English, at
+129–196 words — the realistic length for a VET short answer.
+
+| Document class | n | Range | Flagged |
+|---|---|---|---|
+| Genuine machine-written | 48 | **0–14** | **0 of 48** |
+| Human | 11 | 0–27 | 0 of 11 |
+
+**S1, the largest signal at 22 of 84 points, found zero markers in 48 of 48.** The
+highest-scoring document in the whole exercise was a human second-language student essay,
+at nearly twice the highest machine-written document.
+
+The published evidence for the individual signals is weak or contradictory. Marker
+vocabulary is real at corpus scale (Kobak et al., *Science Advances* 2025) but the words
+decay once known — `delve`, `intricate`, `showcasing`, `realm` and `pivotal` have been
+declining in published writing since March 2024 (Geng & Trotta, arXiv:2502.09606).
+Sentence-length variability measures *r* = −0.13 on real student writing. GPT-4 uses
+*fewer* discourse markers than students (Herbold et al., *Scientific Reports* 2023). Claude
+emits contractions at 30,611 per million words against GPT-3.5's 120.
+
+And the signals share a mechanism with a known harm: they score low lexical and syntactic
+complexity as machine-like, which is what Liang et al. (*Patterns*, 2023) measured
+producing a **61% false-positive rate against non-native English writers**.
+
+They were removed rather than left on display as observations. Anything shown beside a
+copying verdict is read as corroborating it, which is how institutions came to over-rely on
+detector output in the appeals the OIA upheld in 2025.
+
+### What this plugin is not
+
+An AI-writing detector. It does not estimate whether a submission was written by a language
+model, and no score it produces is evidence of that. TEQSA's position (2025) is that
+"detecting gen AI use with certainty in assessments is, at this point, all but impossible".
+
+A similarity score is a reason to read both submissions. It is not a finding.
+
+## Text retention and copy detection are in direct conflict
+
+This is worth understanding before setting a retention period.
+
+Copy detection needs `normtext` — the stored, normalised text of a submission. The cleanup
+task deletes that text after `retentiondays` (default 90). **Once it is gone, that
+submission can never be compared against anything again.** Observed on a live site: of
+three analysed submissions, two already had their text pruned, so only one was comparable
+and no pair could be formed at all.
+
+Within a single activity this rarely matters — classmates submit within days of each other.
+It matters completely for the thing RTOs most need to catch: **next year's intake copying
+this year's work.** A 90-day retention period makes cross-cohort detection impossible by
+construction, because last year's text is already deleted.
+
+The resolution, if cross-cohort comparison is ever built, is **not** to retain the text
+longer. It is to store an irreversible similarity fingerprint — a set of hashed word
+bigrams — alongside the text, and let the cleanup task delete the readable text on schedule
+while keeping the fingerprint. A fingerprint cannot be read back as the student's writing,
+so it is *better* for privacy than what is stored today, and it is all the comparison needs.
+That is a design note, not a feature: nothing in this release does it.
+
+### What governs sections
+
+Not a setting. `question_parser` drops any section shorter than 40 characters, and falls
+back to treating the whole document as one section if that leaves nothing.
+
+Releases up to 1.0.99 offered a **"Minimum section words"** setting, described as "Sections
+shorter than this are skipped". It was never read by any code — it was saved, displayed and
+ignored. It was found because a live site had it deliberately set to 200, which is not the
+default, so somebody had configured it expecting an effect. It was removed in 1.1.1 rather
+than implemented, because sections are no longer analysed at all: they exist to show a
+marker the text that was extracted, and hiding short ones from them would be a loss rather
+than a control.
+
+---
+
+## Upgrading from 1.0.98 or earlier
+
+**The score changed meaning in 1.0.99.** It used to be a sum of writing-style signals; it
+is now the percentage of a submission's wording that appears in another submission to the
+same activity.
+
+Submissions analysed before the upgrade keep their old number, and DocGuard labels them
+rather than reinterpreting them — both the class report and the per-student report say
+plainly that they were scored under the previous model. Nothing in the database is altered
+by the upgrade.
+
+To rescore a submission against the current model, use the **Re-analyse** link beside it.
+The copying table is unaffected either way: it is computed fresh from the stored text on
+every page load, for every analysed submission, whichever model scored it.
+
+There is deliberately no bulk-rescore button yet. It needs new task and database code, and
+that is the one area of this plugin that has repeatedly shipped defects, so it is being held
+for a release that can be verified against a real Moodle first.
 
 ---
 

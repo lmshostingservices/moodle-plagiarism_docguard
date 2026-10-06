@@ -311,6 +311,10 @@ echo '<div class="docguard-report-header" '
 echo '<div>';
 echo '<h2 style="margin:0 0 0.25rem;">' . get_string('classreportheading', 'plagiarism_docguard') . '</h2>';
 echo '<p style="margin:0;opacity:0.8;font-size:0.9rem;">' . s($actname) . ' &nbsp;|&nbsp; ' . s($course->fullname) . '</p>';
+// V1.0.93: the scope of the check, stated where the teacher reads the scores rather than
+// left to be inferred from the column headings.
+echo '<p style="margin:0.3rem 0 0;font-size:0.8rem;color:#92400e;">'
+    . s(get_string('scopenoteshort', 'plagiarism_docguard')) . '</p>';
 echo '</div>';
 echo '<div>';
 echo '<a href="' . $scanurl->out(false) . '" class="btn btn-outline-light btn-sm"'
@@ -370,6 +374,173 @@ foreach ($statcards as [$label, $val, $bg, $fg]) {
 echo '</div>';
 
 // Cross-student similarity section.
+/*
+ * V1.1.0. Copying leads the page.
+ *
+ * This block used to sit below the submissions table, after a column of risk scores
+ * built from writing-style signals. The signals were removed in 1.0.99 - tested
+ * against 48 answers written by three current language models, they flagged none of
+ * them - and this is now the only check the plugin performs that compares a submission
+ * against anything. It belongs at the top of the page, not under a fold.
+ */
+/*
+ * V1.1.0. Count the submissions still carrying a score from the previous model.
+ *
+ * Their stored number is a sum of writing-style points, not a similarity percentage, so
+ * it answers a different question from everything else on this page. Reinterpreting it
+ * silently would be a misrepresentation, and leaving it unexplained would leave a trainer
+ * comparing two numbers that are not the same kind of thing.
+ *
+ * No bulk rescore action is offered here. It would mean new task and database code, which
+ * is the one category this plugin has repeatedly shipped defects in, so the existing
+ * per-submission Re-analyse path is pointed at instead and a bulk option is left for a
+ * release that can be verified against a real Moodle first.
+ */
+$dglegacycount = 0;
+foreach ($subs as $dgsub) {
+    if ($dgsub->status !== 'analysed') {
+        continue;
+    }
+    $dgmeta = json_decode((string)$dgsub->analysisjson, true) ?: [];
+    if ((int)($dgmeta['score_model'] ?? 1) < \plagiarism_docguard\analyser::SCORE_MODEL) {
+        $dglegacycount++;
+    }
+}
+
+if ($dglegacycount > 0) {
+    echo '<div style="background:#fffbeb;border:1px solid #fde68a;border-left:4px solid #f59e0b;'
+        . 'border-radius:6px;padding:0.9rem 1.2rem;margin:0 0 1.25rem;font-size:0.86rem;'
+        . 'color:#78350f;line-height:1.6;">'
+        . get_string('legacyscorebulk', 'plagiarism_docguard', $dglegacycount)
+        . '</div>';
+}
+
+/*
+ * V1.1.0: moved above the similarity block, which names students and therefore reads
+ * $dgusers. When the similarity block moved to the top of the page this lookup stayed
+ * below it, so every name in the copying table fell back to "#<userid>".
+ */
+// V1.0.80: fetch every user this page names in ONE query. The row loop below ran a
+// get_record() per submission and the similarity loop ran two more per pair, so a class of
+// 100 with 40 flagged pairs issued ~180 single-row user queries per page load.
+$dguserids = [];
+foreach ($subs as $sub) {
+    $dguserids[(int)$sub->userid] = true;
+}
+$dgusers = $dguserids
+    ? $DB->get_records_list(
+        'user',
+        'id',
+        array_keys($dguserids),
+        '',
+        'id,firstname,lastname,username,firstnamephonetic,lastnamephonetic,middlename,alternatename'
+    )
+    : [];
+
+// Cross-student similarity overview.
+echo '<h4 style="margin:2rem 0 0.5rem;">' . get_string('crosssimilarity', 'plagiarism_docguard') . '</h4>';
+echo '<p style="font-size:0.88rem;color:#555;">'
+    . get_string('crosssimilaritydesc', 'plagiarism_docguard') . '</p>';
+
+// V1.0.80: PRECOMPUTE each document's bigram set ONCE.
+//
+// What was wrong: the inner loop called bigrams() on BOTH documents of every pair. For n
+// analysed submissions that is n(n-1) tokenisations of a string up to 65 KB — 9,900 of
+// them for a class of 100, when there are only 100 distinct documents to tokenise. Each
+// bigrams() call does an explode() into ~10,000 words, builds a ~10,000-entry hash and
+// then throws the hash away with array_keys(), and jaccard() immediately array_flip()s it
+// back and array_merge()s both sides to count the union. Every document in the class was
+// therefore re-tokenised 99 times, and the page did the heaviest work it does in the
+// hottest loop it has.
+//
+// Now: one bigram_set() per document (n calls), then n(n-1)/2 comparisons that only
+// intersect two ready-made hashes — jaccard_sets() is |A∩B| / (|A|+|B|-|A∩B|), identical
+// arithmetic to the old jaccard(). Tokenisation drops from O(n²) to O(n); the comparison
+// loop stays O(n²) because comparing every pair is the feature, but each comparison is now
+// a hash intersection instead of two full tokenisations. Also removed the redundant
+// $seen[] map: the j = i+1 loop cannot generate a pair twice.
+require_once($CFG->dirroot . '/plagiarism/docguard/classes/question_parser.php');
+
+$analysed = array_filter($subs, fn($s) => $s->status === 'analysed' && strlen((string)$s->normtext) > 100);
+$pairs    = [];
+$arr      = array_values($analysed);
+$count    = count($arr);
+
+$bigramsets = [];
+foreach ($arr as $idx => $row) {
+    $bigramsets[$idx] = \plagiarism_docguard\question_parser::bigram_set((string)$row->normtext);
+}
+
+for ($i = 0; $i < $count; $i++) {
+    for ($j = $i + 1; $j < $count; $j++) {
+        $sim = \plagiarism_docguard\question_parser::jaccard_sets($bigramsets[$i], $bigramsets[$j]);
+        /*
+         * V1.0.93 FIX-DG-S12-THRESHOLD: 0.35, matching compute_s12_score().
+         *
+         * This listed pairs from 0.30 under a heading about academic misconduct, while
+         * the scoring function awards nothing below 0.35. A pair at 0.31 was named to a
+         * teacher as a concern that the plugin's own engine did not consider worth a
+         * single point. One threshold now, in one place.
+         */
+        if ($sim >= \plagiarism_docguard\analyser::S12_REPORT_THRESHOLD) {
+            $pairs[] = ['a' => $arr[$i], 'b' => $arr[$j], 'sim' => $sim];
+        }
+    }
+}
+unset($bigramsets);
+
+if (empty($pairs)) {
+    echo '<p style="color:#6b7280;font-style:italic;">'
+        . get_string('nosimilarities', 'plagiarism_docguard') . '</p>';
+} else {
+    usort($pairs, fn($x, $y) => $y['sim'] <=> $x['sim']);
+    echo '<table class="docguard-similarity-table">';
+    echo '<thead><tr>'
+        . '<th>' . get_string('colstudenta', 'plagiarism_docguard') . '</th>'
+        . '<th>' . get_string('colstudentb', 'plagiarism_docguard') . '</th>'
+        . '<th>' . get_string('colsimilarity', 'plagiarism_docguard') . '</th>'
+        . '<th>' . get_string('colconcern', 'plagiarism_docguard') . '</th>'
+        . '</tr></thead><tbody>';
+    foreach ($pairs as $pair) {
+        // V1.0.80: served from the batch fetched above — no per-pair user queries.
+        $ua   = $dgusers[(int)$pair['a']->userid] ?? null;
+        $ub   = $dgusers[(int)$pair['b']->userid] ?? null;
+        $fna  = $ua ? fullname($ua) : '#' . $pair['a']->userid;
+        $fnb  = $ub ? fullname($ub) : '#' . $pair['b']->userid;
+        $sim  = $pair['sim'];
+        $pct  = round($sim * 100);
+        /*
+         * V1.1.0 FIX-DG-CONCERN-BANDS-FROM-ONE-PLACE.
+         *
+         * These were 0.70 and 0.50 while the plugin's bands are 65 and 35, so the colour
+         * and the wording in this table disagreed with the band shown everywhere else for
+         * the same pair. A pair at 60% was coloured and labelled as a lesser concern here
+         * while the submission it belongs to was banded MEDIUM, and a pair at 67% was
+         * labelled the middle tier while its submission was banded HIGH.
+         *
+         * This is the third time the same defect has appeared in this plugin: the S12
+         * reporting threshold drifted from the scoring threshold (fixed 1.0.93), band
+         * literals were duplicated out of band() (fixed 1.0.94), and now this. Every
+         * threshold a reader can see comes from the constants, and a mutation guard
+         * reintroduces the literals to prove the test catches it.
+         */
+        $band = \plagiarism_docguard\analyser::band($sim * 100);
+        $col  = $band === 'high' ? '#b71c1c' : ($band === 'medium' ? '#e65100' : '#374151');
+        $warn = get_string('concern' . $band, 'plagiarism_docguard');
+        echo '<tr>';
+        echo '<td>' . s($fna) . ' <a href="'
+            . (new moodle_url('/plagiarism/docguard/student_report.php', ['subid' => $pair['a']->id]))->out(false)
+            . '" style="font-size:0.8rem;">' . get_string('viewlink', 'plagiarism_docguard') . '</a></td>';
+        echo '<td>' . s($fnb) . ' <a href="'
+            . (new moodle_url('/plagiarism/docguard/student_report.php', ['subid' => $pair['b']->id]))->out(false)
+            . '" style="font-size:0.8rem;">' . get_string('viewlink', 'plagiarism_docguard') . '</a></td>';
+        echo '<td style="font-weight:700;color:' . $col . ';">' . $pct . '%</td>';
+        echo '<td style="color:' . $col . ';">' . $warn . '</td>';
+        echo '</tr>';
+    }
+    echo '</tbody></table>';
+}
+
 echo '<h4 style="margin:1.5rem 0 0.5rem;">' . get_string('submissionsheading', 'plagiarism_docguard') . '</h4>';
 
 echo '<table class="generaltable docguard-signal-table" style="width:100%;">';
@@ -397,23 +568,6 @@ $bandcolours = [
     'low'    => ['#e8f5e9', '#2e7d32'],
 ];
 
-// V1.0.80: fetch every user this page names in ONE query. The row loop below ran a
-// get_record() per submission and the similarity loop ran two more per pair, so a class of
-// 100 with 40 flagged pairs issued ~180 single-row user queries per page load.
-$dguserids = [];
-foreach ($subs as $sub) {
-    $dguserids[(int)$sub->userid] = true;
-}
-$dgusers = $dguserids
-    ? $DB->get_records_list(
-        'user',
-        'id',
-        array_keys($dguserids),
-        '',
-        'id,firstname,lastname,username,firstnamephonetic,lastnamephonetic,middlename,alternatename'
-    )
-    : [];
-
 foreach ($subs as $sub) {
     $user = $dgusers[(int)$sub->userid] ?? null;
     $fn   = $user ? fullname($user) : get_string('unknownuser', 'plagiarism_docguard', $sub->userid);
@@ -425,7 +579,7 @@ foreach ($subs as $sub) {
     if ($sub->status === 'analysed') {
         $scorehtml = '<span style="background:' . $bg . ';color:' . $fg . ';padding:2px '
             . '8px;border-radius:4px;font-weight:600;font-size:0.85rem;">'
-            . (int)$sub->overall_riskscore . '/100 &nbsp; ' . ($dgrisklabels[$level] ?? strtoupper($level))
+            . (int)$sub->overall_riskscore . '% &nbsp; ' . ($dgrisklabels[$level] ?? strtoupper($level))
             . '</span>';
     } else if ($sub->status === 'error') {
         $scorehtml = '<span style="color:#6b21a8;font-size:0.82rem;" title="' . s($sub->errormsg) . '">'
@@ -471,88 +625,5 @@ foreach ($subs as $sub) {
 }
 echo '</tbody></table>';
 
-// Cross-student similarity overview.
-echo '<h4 style="margin:2rem 0 0.5rem;">' . get_string('crosssimilarity', 'plagiarism_docguard') . '</h4>';
-echo '<p style="font-size:0.88rem;color:#555;">'
-    . get_string('crosssimilaritydesc', 'plagiarism_docguard') . '</p>';
-
-// V1.0.80: PRECOMPUTE each document's bigram set ONCE.
-//
-// What was wrong: the inner loop called bigrams() on BOTH documents of every pair. For n
-// analysed submissions that is n(n-1) tokenisations of a string up to 65 KB — 9,900 of
-// them for a class of 100, when there are only 100 distinct documents to tokenise. Each
-// bigrams() call does an explode() into ~10,000 words, builds a ~10,000-entry hash and
-// then throws the hash away with array_keys(), and jaccard() immediately array_flip()s it
-// back and array_merge()s both sides to count the union. Every document in the class was
-// therefore re-tokenised 99 times, and the page did the heaviest work it does in the
-// hottest loop it has.
-//
-// Now: one bigram_set() per document (n calls), then n(n-1)/2 comparisons that only
-// intersect two ready-made hashes — jaccard_sets() is |A∩B| / (|A|+|B|-|A∩B|), identical
-// arithmetic to the old jaccard(). Tokenisation drops from O(n²) to O(n); the comparison
-// loop stays O(n²) because comparing every pair is the feature, but each comparison is now
-// a hash intersection instead of two full tokenisations. Also removed the redundant
-// $seen[] map: the j = i+1 loop cannot generate a pair twice.
-require_once($CFG->dirroot . '/plagiarism/docguard/classes/question_parser.php');
-
-$analysed = array_filter($subs, fn($s) => $s->status === 'analysed' && strlen((string)$s->normtext) > 100);
-$pairs    = [];
-$arr      = array_values($analysed);
-$count    = count($arr);
-
-$bigramsets = [];
-foreach ($arr as $idx => $row) {
-    $bigramsets[$idx] = \plagiarism_docguard\question_parser::bigram_set((string)$row->normtext);
-}
-
-for ($i = 0; $i < $count; $i++) {
-    for ($j = $i + 1; $j < $count; $j++) {
-        $sim = \plagiarism_docguard\question_parser::jaccard_sets($bigramsets[$i], $bigramsets[$j]);
-        if ($sim >= 0.30) {
-            $pairs[] = ['a' => $arr[$i], 'b' => $arr[$j], 'sim' => $sim];
-        }
-    }
-}
-unset($bigramsets);
-
-if (empty($pairs)) {
-    echo '<p style="color:#6b7280;font-style:italic;">'
-        . get_string('nosimilarities', 'plagiarism_docguard') . '</p>';
-} else {
-    usort($pairs, fn($x, $y) => $y['sim'] <=> $x['sim']);
-    echo '<table class="docguard-similarity-table">';
-    echo '<thead><tr>'
-        . '<th>' . get_string('colstudenta', 'plagiarism_docguard') . '</th>'
-        . '<th>' . get_string('colstudentb', 'plagiarism_docguard') . '</th>'
-        . '<th>' . get_string('colsimilarity', 'plagiarism_docguard') . '</th>'
-        . '<th>' . get_string('colconcern', 'plagiarism_docguard') . '</th>'
-        . '</tr></thead><tbody>';
-    foreach ($pairs as $pair) {
-        // V1.0.80: served from the batch fetched above — no per-pair user queries.
-        $ua   = $dgusers[(int)$pair['a']->userid] ?? null;
-        $ub   = $dgusers[(int)$pair['b']->userid] ?? null;
-        $fna  = $ua ? fullname($ua) : '#' . $pair['a']->userid;
-        $fnb  = $ub ? fullname($ub) : '#' . $pair['b']->userid;
-        $sim  = $pair['sim'];
-        $pct  = round($sim * 100);
-        $col  = $sim >= 0.70 ? '#b71c1c' : ($sim >= 0.50 ? '#e65100' : '#374151');
-        $warn = $sim >= 0.70
-            ? get_string('concernhigh', 'plagiarism_docguard')
-            : ($sim >= 0.50
-                ? get_string('concernmedium', 'plagiarism_docguard')
-                : get_string('concernlow', 'plagiarism_docguard'));
-        echo '<tr>';
-        echo '<td>' . s($fna) . ' <a href="'
-            . (new moodle_url('/plagiarism/docguard/student_report.php', ['subid' => $pair['a']->id]))->out(false)
-            . '" style="font-size:0.8rem;">' . get_string('viewlink', 'plagiarism_docguard') . '</a></td>';
-        echo '<td>' . s($fnb) . ' <a href="'
-            . (new moodle_url('/plagiarism/docguard/student_report.php', ['subid' => $pair['b']->id]))->out(false)
-            . '" style="font-size:0.8rem;">' . get_string('viewlink', 'plagiarism_docguard') . '</a></td>';
-        echo '<td style="font-weight:700;color:' . $col . ';">' . $pct . '%</td>';
-        echo '<td style="color:' . $col . ';">' . $warn . '</td>';
-        echo '</tr>';
-    }
-    echo '</tbody></table>';
-}
 
 echo $OUTPUT->footer();

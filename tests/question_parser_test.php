@@ -644,19 +644,11 @@ final class question_parser_test extends \advanced_testcase {
         ];
     }
 
-    /**
-     * similarity() returns the similar_text() percentage scaled to 0.0-1.0 and
-     * rounded to four decimal places.
-     *
-     * @dataProvider similarity_provider
-     * @param string $a First normalised text.
-     * @param string $b Second normalised text.
-     * @param float $expected The similarity observed from the real method.
-     * @return void
+    /*
+     * V1.1.1: test_similarity() removed with the function it covered. See the note in
+     * question_parser.php - similar_text() is a character measure that copy detection
+     * has never used, and reported 23% for two unrelated paragraphs.
      */
-    public function test_similarity(string $a, string $b, float $expected): void {
-        $this->assertSame($expected, question_parser::similarity($a, $b));
-    }
 
     /**
      * Regression tests for FIX-DG-INDENTED-MARKERS (v1.0.86).

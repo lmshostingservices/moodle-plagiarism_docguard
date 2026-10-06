@@ -263,21 +263,30 @@ class question_parser {
         return trim($t);
     }
 
-    /**
-     * Compute similarity ratio between two normalised text strings.
-     * Returns 0.0 – 1.0.
+    /*
+     * V1.1.1: similarity() REMOVED.
      *
-     * @param string $a First normalised text.
-     * @param string $b Second normalised text.
-     * @return float Similarity from 0.0 to 1.0; 0.0 when either string is empty.
+     * It was:
+     *     a call to PHP's similar_text, returning its percentage divided by 100.
+     *
+     * That function is a character-level longest-common-substring measure. Copy detection
+     * in this plugin has never used it - it uses jaccard_sets() over word bigrams - and the
+     * two do not agree even approximately:
+     *
+     *     pair                              similarity()   production
+     *     independent, same question            54.4%          9.8%
+     *     unrelated topics (control)            23.0%          1.1%
+     *
+     * Any two pieces of English prose share most of their characters, so it reported 23%
+     * for a hand-washing procedure against a paragraph on mitochondria.
+     *
+     * It was never called by production code, only by tests - but a function named
+     * similarity(), in a plugin whose entire purpose is similarity, that computes something
+     * else, is a trap. It caught one of this plugin's own tests, which asserted a
+     * quotation-stripping result against the wrong measure and passed anyway, and then the
+     * install verification script written the same hour. Removed rather than renamed:
+     * production has jaccard_sets() and nothing needs a second answer.
      */
-    public static function similarity(string $a, string $b): float {
-        if ($a === '' || $b === '') {
-            return 0.0;
-        }
-        similar_text($a, $b, $pct);
-        return round($pct / 100, 4);
-    }
 
     /**
      * Split normalised text into comparison tokens.

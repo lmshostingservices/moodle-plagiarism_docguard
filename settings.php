@@ -57,7 +57,6 @@ if (optional_param('save', false, PARAM_BOOL) && confirm_sesskey()) {
     set_config('siteid', optional_param('siteid', '', PARAM_ALPHANUMEXT), 'plagiarism_docguard');
     set_config('apikey', optional_param('apikey', '', PARAM_TEXT), 'plagiarism_docguard');
     set_config('enabled', optional_param('enabled', 0, PARAM_BOOL), 'plagiarism_docguard');
-    set_config('minsectionwords', optional_param('minsectionwords', 30, PARAM_INT), 'plagiarism_docguard');
     set_config('enablebackfill', optional_param('enablebackfill', 0, PARAM_BOOL), 'plagiarism_docguard');
     set_config('retentiondays', optional_param('retentiondays', 90, PARAM_INT), 'plagiarism_docguard');
 
@@ -79,12 +78,28 @@ if (optional_param('save', false, PARAM_BOOL) && confirm_sesskey()) {
 $siteid         = (string)(plagiarism_docguard_get_siteid() ?: '');
 $apikey         = (string)(plagiarism_docguard_get_apikey() ?: '');
 $enabled        = (int)get_config('plagiarism_docguard', 'enabled');
-// V1.0.84: `?:` fires on a deliberate 0 as well as on the unset key, so an admin who
-// entered 0 (analyse every section, however short) saw 30 come back. Same trap as
-// retentiondays above; only the never-saved sentinels take the default.
-$minsecwordsraw = get_config('plagiarism_docguard', 'minsectionwords');
-$minsecwords    = ($minsecwordsraw === false || $minsecwordsraw === null || $minsecwordsraw === '')
-    ? 30 : (int)$minsecwordsraw;
+/*
+ * V1.1.0. 'minsectionwords' is gone.
+ *
+ * It was a dead setting. It was saved, read back, rendered in this form, and described to
+ * the administrator as "Minimum word count per section to include it in analysis. Sections
+ * shorter than this are skipped" - and NOTHING in the plugin ever read it. Found because a
+ * live site had it set to 200, deliberately, which is not the default: somebody configured
+ * it expecting an effect and got none.
+ *
+ * It is removed rather than implemented. Under the current model sections are not analysed
+ * at all - the comparison runs on the whole document - so the setting cannot do what it
+ * says. What sections are for now is showing a marker the text that was extracted, and
+ * hiding short ones from them would be a loss, not a control.
+ *
+ * The real behaviour, which was never the setting's: question_parser drops a section under
+ * MIN_SECTION_CHARS (40 characters), and falls back to treating the whole document as one
+ * section if that leaves nothing. That is now stated in the README instead of being
+ * misdescribed by a control that did nothing.
+ *
+ * The orphaned config row is harmless and is left in place rather than deleted, so an
+ * administrator downgrading does not silently lose a value they set.
+ */
 $enablebackfill = (int)get_config('plagiarism_docguard', 'enablebackfill');
 $retentiondays  = plagiarism_docguard_retention_days();
 
@@ -180,11 +195,6 @@ $row(
     'enabled',
     html_writer::empty_tag('input', ['type' => 'checkbox', 'name' => 'enabled',
         'value' => '1'] + ($enabled ? ['checked' => 'checked'] : []))
-);
-$row(
-    'minsectionwords',
-    html_writer::empty_tag('input', ['type' => 'number', 'name' => 'minsectionwords',
-        'value' => $minsecwords, 'class' => 'form-control', 'style' => 'max-width:140px;'])
 );
 $row(
     'enablebackfill',
