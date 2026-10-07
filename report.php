@@ -469,30 +469,120 @@ $pairs    = [];
 $arr      = array_values($analysed);
 $count    = count($arr);
 
-$bigramsets = [];
-foreach ($arr as $idx => $row) {
-    $bigramsets[$idx] = \plagiarism_docguard\question_parser::bigram_set((string)$row->normtext);
-}
+/*
+ * V1.1.5 FIX-DG-SHARED-TEMPLATE-INFLATES-EVERY-PAIR, the second half of it.
+ *
+ * This page had its OWN pairwise comparison, which compared the raw bigram sets. Adding the
+ * template subtraction to analyser::cross_student_similarity() therefore fixed the badge on
+ * each submission and left THIS table - the one a trainer actually reads before opening a
+ * misconduct file - still listing every innocent pair in the cohort. Both now go through
+ * analyser::template_bigrams_for_cohort(), which is the single definition of what the
+ * activity's assessment tool supplied. report.php already carried its own transcription of
+ * the user-name field list, which is how FIX-DG-FULLNAME-MISSING-NAME-FIELDS happened in
+ * 1.1.4; this was the same mistake in the same file.
+ */
+$dgtemplate = \plagiarism_docguard\analyser::template_bigrams_for_cohort(
+    array_map(fn($row) => (string)$row->normtext, $arr)
+);
+$dgtemplatesize = count($dgtemplate);
 
-for ($i = 0; $i < $count; $i++) {
-    for ($j = $i + 1; $j < $count; $j++) {
-        $sim = \plagiarism_docguard\question_parser::jaccard_sets($bigramsets[$i], $bigramsets[$j]);
-        /*
-         * V1.0.93 FIX-DG-S12-THRESHOLD: 0.35, matching compute_s12_score().
-         *
-         * This listed pairs from 0.30 under a heading about academic misconduct, while
-         * the scoring function awards nothing below 0.35. A pair at 0.31 was named to a
-         * teacher as a concern that the plugin's own engine did not consider worth a
-         * single point. One threshold now, in one place.
-         */
-        if ($sim >= \plagiarism_docguard\analyser::S12_REPORT_THRESHOLD) {
-            $pairs[] = ['a' => $arr[$i], 'b' => $arr[$j], 'sim' => $sim];
+/*
+ * Below the cohort floor the template cannot be identified at all: with two submissions,
+ * text in both is either the assessment tool's or one student's copy of the other, and
+ * nothing in the data separates them. Measured, two independent answers carrying an ordinary
+ * cover sheet and declaration score 50.5% - MEDIUM, and listed here as a match. The table is
+ * suppressed rather than filled with a number that is wrong, and it fills itself in as soon
+ * as the third student submits.
+ */
+if ($count < \plagiarism_docguard\analyser::COHORT_MIN_FOR_COMPARISON) {
+    echo '<p style="color:#6b7280;font-style:italic;">'
+        . get_string('toofewforcomparison', 'plagiarism_docguard', (object)[
+            'count' => $count,
+            'min'   => \plagiarism_docguard\analyser::COHORT_MIN_FOR_COMPARISON,
+        ])
+        . '</p>';
+} else {
+    /*
+     * V1.2.0 FIX-DG-REPORT-MEMORY. The pairwise table needs every submission's word-pair set
+     * held at once, because each is compared with every other, so its memory grows with the
+     * size of the activity.
+     *
+     * Measured. On realistic submissions this is a non-issue: 250 rows of 4,000-word
+     * assessments peaked at 22 MB, because ordinary prose repeats itself and the word-pair
+     * vocabulary stays small. The cost only becomes real on documents where almost every word
+     * pair is unique - a reference list, pasted code, generated filler - where 100 rows at the
+     * 65,000-character storage cap peaked at 116 MB and 250 would exceed 250 MB. A page that
+     * white-screens with "Allowed memory size exhausted" and no explanation is a worse outcome
+     * than a page that says what it did not do, so the row count is capped and the cap is
+     * stated. The per-submission badges are computed at analysis time, are unaffected by this,
+     * and remain complete.
+     */
+    $dgpaircap = 300;
+    $dgcapped  = $count > $dgpaircap;
+    if ($dgcapped) {
+        // Most recent first: the submissions a trainer is currently marking.
+        $arr   = array_slice($arr, -$dgpaircap);
+        $count = count($arr);
+        echo '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;'
+            . 'padding:0.8rem 1rem;margin-bottom:1rem;font-size:0.84rem;color:#78350f;'
+            . 'line-height:1.6;">'
+            . get_string('paircapped', 'plagiarism_docguard', (object)[
+                'shown' => $count,
+                'total' => count($analysed),
+            ])
+            . '</div>';
+    }
+
+    $bigramsets = [];
+    foreach ($arr as $idx => $row) {
+        $bigramsets[$idx] = array_diff_key(
+            \plagiarism_docguard\question_parser::bigram_set((string)$row->normtext),
+            $dgtemplate
+        );
+    }
+
+    for ($i = 0; $i < $count; $i++) {
+        for ($j = $i + 1; $j < $count; $j++) {
+            if (empty($bigramsets[$i]) || empty($bigramsets[$j])) {
+                // Nothing of the student's own survives the template: an empty form, or an
+                // answer that restates the question. A matter for the assessor, not a match.
+                continue;
+            }
+            $sim = \plagiarism_docguard\question_parser::jaccard_sets($bigramsets[$i], $bigramsets[$j]);
+            /*
+             * V1.0.93 FIX-DG-S12-THRESHOLD: 0.35, matching compute_s12_score().
+             *
+             * This listed pairs from 0.30 under a heading about academic misconduct, while
+             * the scoring function awards nothing below 0.35. A pair at 0.31 was named to a
+             * teacher as a concern that the plugin's own engine did not consider worth a
+             * single point. One threshold now, in one place.
+             */
+            if ($sim >= \plagiarism_docguard\analyser::S12_REPORT_THRESHOLD) {
+                $pairs[] = ['a' => $arr[$i], 'b' => $arr[$j], 'sim' => $sim];
+            }
         }
     }
-}
-unset($bigramsets);
+    unset($bigramsets);
 
-if (empty($pairs)) {
+    /*
+     * State the basis of the figures, so a trainer taking one of these pairs to a misconduct
+     * meeting can say what the number measures and what it excludes - and so a student or
+     * their advocate can interrogate it rather than being asked to accept it.
+     */
+    echo '<p style="color:#6b7280;font-size:0.9em;">'
+        . get_string('comparisonbasis', 'plagiarism_docguard', (object)[
+            'cohort'   => $count,
+            'min'      => \plagiarism_docguard\analyser::template_threshold($count),
+            'excluded' => $dgtemplatesize,
+        ])
+        . '</p>';
+}
+
+if ($count < \plagiarism_docguard\analyser::COHORT_MIN_FOR_COMPARISON) {
+    // Already explained above. Saying "no similarities found" as well would claim a result
+    // from a comparison that was deliberately not performed.
+    $pairs = [];
+} else if (empty($pairs)) {
     echo '<p style="color:#6b7280;font-style:italic;">'
         . get_string('nosimilarities', 'plagiarism_docguard') . '</p>';
 } else {

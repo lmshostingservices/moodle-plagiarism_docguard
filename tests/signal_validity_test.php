@@ -400,9 +400,15 @@ final class signal_validity_test extends \advanced_testcase {
 
     /**
      * Stored scores carry a stamp saying which model produced them.
+     *
+     * The stamp must rise whenever the meaning of the number changes, so that rows already
+     * in the database are labelled rather than silently reinterpreted. It went to 3 in
+     * 1.1.5, when the activity's shared template text stopped counting towards similarity:
+     * a model 2 score on a templated activity is mostly the template, and comparing it with
+     * a model 3 score would be comparing two different measurements.
      */
     public function test_stored_scores_are_stamped_with_the_score_model(): void {
-        $this->assertSame(2, analyser::SCORE_MODEL);
+        $this->assertSame(3, analyser::SCORE_MODEL);
 
         $src = file_get_contents(__DIR__ . '/../classes/analyser.php');
         $this->assertStringContainsString("'score_model'      => self::SCORE_MODEL", $src,
@@ -558,5 +564,522 @@ final class signal_validity_test extends \advanced_testcase {
                 $file . ' must take its user field list from user_fields_for_fullname()'
             );
         }
+    }
+
+    /* ── V1.1.5: the activity's own template is not evidence about a student ──── */
+
+    /**
+     * An ordinary RTO assessment cover sheet and student declaration.
+     *
+     * Every student in the activity submits this text because the assessment tool told them
+     * to. It is 185 words - shorter than many real ones, which also carry mapping tables,
+     * version footers and a unit-of-competency extract.
+     */
+    private function cover_sheet(string $unit, string $question): string {
+        return 'ASSESSMENT COVER SHEET. Registered Training Organisation code 41234. '
+            . 'Unit of competency ' . $unit . '. Assessment task 1 of 3, written questions. '
+            . 'Instructions to the student. Answer all questions in your own words in the '
+            . 'spaces provided. You must complete every question to be assessed as '
+            . 'satisfactory. If you need more space, attach additional pages and label them '
+            . 'clearly. Your assessor will provide feedback within ten working days. If you '
+            . 'are assessed as not yet satisfactory you are entitled to two further attempts. '
+            . 'Reasonable adjustment is available on request, please speak to your trainer '
+            . 'before you begin. Student declaration. I declare that this assessment is my own '
+            . 'work, that I have not copied from any other student, and that I have not '
+            . 'allowed any other student to copy my work. I understand that plagiarism and '
+            . 'cheating are serious breaches of this organisation\'s academic misconduct '
+            . 'policy and may result in my enrolment being cancelled. I confirm that I have '
+            . 'retained a copy of this assessment for my own records. ' . $question . ' My answer. ';
+    }
+
+    /**
+     * The scoring pipeline exactly as cross_student_similarity() runs it, minus the database.
+     *
+     * @param array $docs Map of name => raw submitted text.
+     * @return array Map of name => bigram set with the activity's template subtracted.
+     */
+    private function compare_cohort(array $docs): array {
+        $strip = new \ReflectionMethod(analyser::class, 'prepare_for_scoring');
+        $strip->setAccessible(true);
+
+        $sets = [];
+        foreach ($docs as $name => $text) {
+            $sets[$name] = question_parser::bigram_set(
+                question_parser::normalise_for_similarity($strip->invoke(null, $text)['text'])
+            );
+        }
+        $docfreq = [];
+        foreach ($sets as $set) {
+            foreach ($set as $bigram => $ignored) {
+                $docfreq[$bigram] = ($docfreq[$bigram] ?? 0) + 1;
+            }
+        }
+        $template = analyser::template_bigrams($docfreq, count($sets));
+
+        $clean = [];
+        foreach ($sets as $name => $set) {
+            $clean[$name] = array_diff_key($set, $template);
+        }
+        return $clean;
+    }
+
+    /**
+     * Two students who submit the same assessment template are not copying each other.
+     *
+     * The defect this guards: before 1.1.5 the comparison ran over the whole extracted
+     * document, template included. On a 10-student cohort sharing one cover sheet, all 44
+     * innocent pairs cleared the reporting threshold. This test asserts the shipped
+     * behaviour on the pair that was worst affected - two students who answered DIFFERENT
+     * UNITS and still measured 48.0% on the strength of the cover sheet alone.
+     */
+    public function test_shared_template_text_is_not_reported_as_copying(): void {
+        $q = 'Question 4. Explain the temperature danger zone and describe how you monitor it.';
+        $sheet = $this->cover_sheet('SITXFSA005 Use hygienic practices for food safety', $q);
+
+        $foodsafety = 'I always check the temperature of the cool room at the start of my shift '
+            . 'and write it on the chart near the door. The danger zone is between 5 and 60 '
+            . 'degrees because that is where bacteria grow fastest. If food sits in that range '
+            . 'for more than four hours we have to throw it out. I check with the probe '
+            . 'thermometer and I wipe it with an alcohol swab before and after.';
+        $personalcare = 'When I am supporting a client with a shower I knock first and wait to be '
+            . 'invited in, even in their own room, because that is their private space. I ask how '
+            . 'they would like to be helped rather than assuming. If a client says no I stop, and '
+            . 'I record that they declined in the progress notes and tell the registered nurse.';
+        $different = 'At the beginning of every shift my job is to record the fridge and cool room '
+            . 'temperatures in the log book. Under the two hour four hour rule, anything left in '
+            . 'the danger zone beyond four hours must be discarded. I sanitise the probe between '
+            . 'different foods to avoid cross contamination and report any fault to my supervisor.';
+
+        // Raw, template included: the defect. Establish it, or the test proves nothing.
+        $raw = fn($a, $b) => question_parser::jaccard_sets(
+            question_parser::bigram_set(question_parser::normalise_for_similarity($a)),
+            question_parser::bigram_set(question_parser::normalise_for_similarity($b))
+        );
+        $this->assertGreaterThan(
+            analyser::S12_REPORT_THRESHOLD,
+            $raw($sheet . $foodsafety, $sheet . $personalcare),
+            'Fixture must reproduce the defect: the shared cover sheet alone must push two '
+            . 'answers to different units above the reporting threshold.'
+        );
+
+        $clean = $this->compare_cohort([
+            'a' => $sheet . $foodsafety,
+            'b' => $sheet . $personalcare,
+            'c' => $sheet . $different,
+        ]);
+        foreach ([['a', 'b'], ['a', 'c'], ['b', 'c']] as [$x, $y]) {
+            $this->assertLessThan(
+                analyser::S12_REPORT_THRESHOLD,
+                question_parser::jaccard_sets($clean[$x], $clean[$y]),
+                "Independent answers $x/$y must not be reported once the template is removed."
+            );
+        }
+    }
+
+    /**
+     * Removing the template must not remove the copying.
+     */
+    public function test_a_real_copy_still_scores_high_through_the_template(): void {
+        $q = 'Question 4. Explain the temperature danger zone and describe how you monitor it.';
+        $sheet = $this->cover_sheet('SITXFSA005 Use hygienic practices for food safety', $q);
+
+        $dana = 'I always check the temperature of the cool room at the start of my shift and '
+            . 'write it on the chart near the door. The danger zone is between 5 and 60 degrees '
+            . 'because that is where bacteria grow fastest. If food sits in that range for more '
+            . 'than four hours we have to throw it out. Last month the cool room read 8 degrees '
+            . 'so I told the chef straight away and we moved the dairy into the other fridge.';
+        // Luke's copy of Dana, with the handful of word swaps a copier actually makes.
+        $luke = str_replace(
+            ['start of my shift', 'write it', 'grow fastest', 'throw it out', 'told the chef', 'moved the dairy'],
+            ['beginning of my shift', 'record it', 'grow quickest', 'discard it', 'informed the chef', 'shifted the dairy'],
+            $dana
+        );
+        $priya = 'At the beginning of every shift my job is to record the fridge and cool room '
+            . 'temperatures in the log book. Under the two hour four hour rule, anything left in '
+            . 'the danger zone beyond four hours must be discarded. I sanitise the probe between '
+            . 'different foods to avoid cross contamination and report any fault to my supervisor.';
+
+        $clean = $this->compare_cohort([
+            'dana' => $sheet . $dana, 'luke' => $sheet . $luke, 'priya' => $sheet . $priya,
+        ]);
+        $this->assertGreaterThan(
+            analyser::BAND_HIGH / 100,
+            question_parser::jaccard_sets($clean['dana'], $clean['luke']),
+            'A copy with light word swaps must still reach HIGH with the template removed.'
+        );
+        $this->assertLessThan(
+            analyser::S12_REPORT_THRESHOLD,
+            question_parser::jaccard_sets($clean['dana'], $clean['priya']),
+            'The student who wrote her own answer must not be dragged in with them.'
+        );
+    }
+
+    /**
+     * The template threshold is a fraction of the cohort, never a fixed count.
+     *
+     * A fixed count of three subtracts the shared text of any three students who copied one
+     * another, which is the evidence. Measured: fixed-3 found 1 of 3 ring pairs at n=30 and
+     * 0 of 15 for a ring of six. This asserts the scaling rule, and
+     * test_a_copy_ring_is_not_hidden_by_the_template_rule asserts what it buys.
+     */
+    public function test_template_threshold_scales_with_the_cohort(): void {
+        // Never below the floor, however small the activity.
+        foreach ([1, 2, 3, 4, 6, 9] as $n) {
+            $this->assertSame(3, analyser::template_threshold($n),
+                "A cohort of $n cannot support a threshold above the floor.");
+        }
+        $this->assertSame(4, analyser::template_threshold(12));
+        $this->assertSame(10, analyser::template_threshold(30));
+        $this->assertSame(14, analyser::template_threshold(40));
+        $this->assertSame(34, analyser::template_threshold(100));
+
+        foreach ([12, 30, 100, 400] as $n) {
+            $this->assertGreaterThan(
+                3,
+                analyser::template_threshold($n),
+                "A fixed threshold of 3 would subtract a three-student copy ring at n=$n."
+            );
+        }
+    }
+
+    /**
+     * Three students copying one another must not erase their own evidence.
+     *
+     * This is the attack that killed the first version of the rule. With a fixed threshold
+     * of three, the ring's shared text appears in three submissions, so it is classified as
+     * template and subtracted - the rule hides exactly what it exists to find.
+     */
+    public function test_a_copy_ring_is_not_hidden_by_the_template_rule(): void {
+        $q = 'Question 4. Explain the temperature danger zone and describe how you monitor it.';
+        $sheet = $this->cover_sheet('SITXFSA005 Use hygienic practices for food safety', $q);
+
+        $source = 'I always check the temperature of the cool room at the start of my shift and '
+            . 'write it on the chart near the door. The danger zone is between 5 and 60 degrees '
+            . 'because that is where bacteria grow fastest. If food sits in that range for more '
+            . 'than four hours we have to throw it out. Last month the cool room read 8 degrees '
+            . 'so I told the chef straight away and we moved the dairy into the other fridge.';
+        $swaps = [
+            ['start of my shift', 'beginning of my shift'], ['write it', 'record it'],
+            ['grow fastest', 'grow quickest'], ['throw it out', 'discard it'],
+            ['told the chef', 'informed the chef'], ['moved the dairy', 'shifted the dairy'],
+        ];
+        $docs = [];
+        for ($i = 0; $i < 3; $i++) {
+            $text = $source;
+            foreach ($swaps as $j => [$from, $to]) {
+                if (($i + $j) % 2 === 0) {
+                    $text = str_replace($from, $to, $text);
+                }
+            }
+            $docs["ring$i"] = $sheet . $text;
+        }
+        // Nine students who wrote their own answers, so the ring is 3 of a cohort of 12.
+        $own = [
+            'I record the fridge temperatures in the log book at the beginning of every shift.',
+            'My supervisor showed me how to use the probe thermometer and sanitise it between foods.',
+            'Food held in the danger zone for over four hours has to be thrown away under the rule.',
+            'I knock before entering a client room and wait to be invited in before I help them.',
+            'We use a slide sheet for transfers when the care plan says two workers are required.',
+            'I wash my hands before handling ready to eat food and after touching raw chicken.',
+            'The cool room alarm sounded on Tuesday so I moved the dairy and called maintenance.',
+            'I check the use by dates on the delivery and reject anything that is out of date.',
+            'When a client declines personal care I record the refusal in the progress notes.',
+        ];
+        foreach ($own as $i => $sentence) {
+            $docs["own$i"] = $sheet . str_repeat($sentence . ' ', 4);
+        }
+
+        $clean = $this->compare_cohort($docs);
+        for ($i = 0; $i < 3; $i++) {
+            for ($j = $i + 1; $j < 3; $j++) {
+                $this->assertGreaterThan(
+                    analyser::S12_REPORT_THRESHOLD,
+                    question_parser::jaccard_sets($clean["ring$i"], $clean["ring$j"]),
+                    "Ring pair $i/$j must still be reported: a cohort-fraction threshold "
+                    . 'exists precisely so that collusion does not classify itself as template.'
+                );
+            }
+        }
+        foreach (array_keys($docs) as $x) {
+            foreach (array_keys($docs) as $y) {
+                if ($x >= $y || (str_starts_with($x, 'ring') && str_starts_with($y, 'ring'))) {
+                    continue;
+                }
+                $this->assertLessThan(
+                    analyser::S12_REPORT_THRESHOLD,
+                    question_parser::jaccard_sets($clean[$x], $clean[$y]),
+                    "Innocent pair $x/$y must not be reported."
+                );
+            }
+        }
+    }
+
+    /**
+     * Below three submissions there is no way to tell a template from a copy, so no pair
+     * is reported.
+     *
+     * Two independent answers carrying an ordinary cover sheet measure 50.5% - above the
+     * threshold, MEDIUM, and put to a trainer as a match. The figure is wrong rather than
+     * imprecise, and the activity corrects itself when the third student submits.
+     */
+    public function test_no_pair_is_reported_below_three_submissions(): void {
+        $this->assertSame(3, analyser::COHORT_MIN_FOR_COMPARISON);
+
+        $src = file_get_contents(__DIR__ . '/../classes/analyser.php');
+        $code = implode("\n", array_filter(
+            explode("\n", $src),
+            fn($l) => !preg_match('~^\s*(\*|//|/\*)~', $l)
+        ));
+        $this->assertMatchesRegularExpression(
+            '/\$cohortsize\s*<\s*self::COHORT_MIN_FOR_COMPARISON/',
+            $code,
+            'cross_student_similarity() must return nothing below the cohort floor. '
+            . '(Comments are stripped here: this guard has matched a comment four times '
+            . 'in this release series.)'
+        );
+    }
+
+    /**
+     * The template is derived from a bounded sample, and the sample does not change the answer.
+     *
+     * V1.2.0 FIX-DG-TEMPLATE-MEMORY. Deriving the template from every submission in a large
+     * activity peaked at 172 MB on a cohort of 100 documents at the normtext storage cap, which
+     * exhausts a 256 MB cron and leaves the submission retrying forever. The template is a
+     * PROPORTION - text carried by a third or more of the submissions - and a sample estimates
+     * a proportion, so it is derived from at most TEMPLATE_SAMPLE_MAX documents.
+     *
+     * Three things have to hold: the template is the same one, the sample is the same every
+     * time, and a copy ring that is a small share of a large cohort is still not swallowed.
+     *
+     * @return void
+     */
+    public function test_the_template_sample_is_bounded_deterministic_and_equivalent(): void {
+        $this->assertSame(60, analyser::TEMPLATE_SAMPLE_MAX);
+
+        $sheet = $this->cover_sheet('SITXFSA005 Use hygienic practices for food safety',
+            'Question 4. Explain the temperature danger zone.');
+
+        // 200 submissions, every one with its own wording under one shared cover sheet.
+        $texts = [];
+        for ($i = 0; $i < 200; $i++) {
+            $texts[] = question_parser::normalise_for_similarity(
+                $sheet . 'On shift number ' . $i . ' I checked the cool room and recorded reading '
+                . $i . ' in the log book before service started for the evening sitting.'
+            );
+        }
+
+        $sampled = analyser::template_bigrams_for_cohort($texts);
+
+        // Same answer as the full cohort would give. Computed here by taking a slice small
+        // enough that no sampling occurs, which is the comparison that matters: boilerplate
+        // appears in every submission, so any honest subset finds it.
+        $unsampled = analyser::template_bigrams_for_cohort(array_slice($texts, 0, 45));
+        $this->assertNotEmpty($sampled, 'The cover sheet must still be identified.');
+        $this->assertSame([], array_diff_key($unsampled, $sampled),
+            'Sampling must not lose template text that a smaller cohort finds.');
+
+        /*
+         * An activity whose assessment tool was REISSUED partway through the cohort: the first
+         * half carries one cover sheet, the second half another. This is the fixture that makes
+         * the sampling strategy testable at all, and it exists because mutation testing showed
+         * the single-template cohort above cannot distinguish any strategy from any other -
+         * when the boilerplate is in every submission, the first N, a stride, and a random
+         * shuffle all find exactly the same template.
+         *
+         * Two properties follow from it:
+         *  - STRIDE, not the first N. Taking the first 60 of 200 sees only the original cover
+         *    sheet and never identifies the reissued one, so every pair in the second half
+         *    keeps its shared boilerplate and reads as a match.
+         *  - DETERMINISTIC, not random. With two templates present, different samples find
+         *    different amounts of each, so a shuffled sample gives the same submission a
+         *    different score on re-analysis. A figure a trainer cannot reproduce is not
+         *    evidence, whatever its value.
+         */
+        /*
+         * The reissued tool must share almost NOTHING with the original, or this fixture cannot
+         * distinguish one sampling strategy from another. The first version reused
+         * cover_sheet() and changed only the question line, which left the two sheets sharing
+         * 71% of their word pairs - so the shared 71% was found by any strategy and the test
+         * passed even when the sampling was mutated. Mutation testing caught that.
+         */
+        $sheettwo = 'VALIDATED ASSESSMENT TOOL v3. Issued under the organisation quality '
+            . 'framework following moderation. Candidate guidance: responses are marked against '
+            . 'the performance criteria listed in the mapping matrix at the rear of this '
+            . 'booklet. Where a response is judged insufficient, your trainer will arrange a '
+            . 'supplementary oral questioning session rather than a full resubmission. Keep your '
+            . 'own copy. Integrity undertaking: by submitting this booklet I confirm the '
+            . 'responses are mine alone, produced without prohibited assistance, and I accept '
+            . 'that breaches are managed under the disciplinary schedule. '
+            . 'Task 4 of 9. Set out what the temperature danger zone is and how you monitor it. ';
+        $reissued = [];
+        for ($i = 0; $i < 200; $i++) {
+            $reissued[] = question_parser::normalise_for_similarity(
+                ($i < 100 ? $sheet : $sheettwo)
+                . ' On shift number ' . $i . ' I checked the cool room and recorded reading '
+                . $i . ' in the log book before service started for the evening sitting.'
+            );
+        }
+
+        $both = analyser::template_bigrams_for_cohort($reissued);
+        $firstsheetonly = analyser::template_bigrams_for_cohort(array_slice($reissued, 0, 45));
+        $secondsheetonly = analyser::template_bigrams_for_cohort(array_slice($reissued, 155, 45));
+
+        $this->assertNotEmpty($firstsheetonly);
+        $this->assertNotEmpty($secondsheetonly);
+
+        // A stride across the whole cohort must see BOTH cover sheets. Taking the first N
+        // would see only the first, and the second half's pairs would stay inflated.
+        $missedsecond = array_diff_key($secondsheetonly, $both);
+        $this->assertLessThan(
+            count($secondsheetonly) / 2,
+            count($missedsecond),
+            'The sample must span the cohort: a template introduced partway through was missed, '
+            . 'which is what taking the first N submissions does.'
+        );
+
+        // Deterministic: the same submission must score the same on re-analysis.
+        for ($run = 0; $run < 4; $run++) {
+            $this->assertSame($sampled, analyser::template_bigrams_for_cohort($texts),
+                'The template must be identical on every run over the same cohort.');
+            $this->assertSame($both, analyser::template_bigrams_for_cohort($reissued),
+                'With two templates in one activity, a random sample finds different amounts '
+                . 'of each and the score stops being reproducible.');
+        }
+
+        // And a copy ring that is a small share of a large cohort must survive the sampling.
+        $source = $sheet . 'I always check the cool room at the start of my shift and write the '
+            . 'reading on the chart near the door because the bacteria grow fastest in the '
+            . 'danger zone between five and sixty degrees so we discard anything left too long.';
+        $ring = [];
+        for ($i = 0; $i < 10; $i++) {
+            $ring[] = question_parser::normalise_for_similarity(
+                str_replace(
+                    ['always check', 'write the reading', 'grow fastest', 'discard'],
+                    $i % 2 === 0
+                        ? ['check', 'record the reading', 'multiply quickest', 'throw out']
+                        : ['always inspect', 'note the reading', 'grow quickest', 'bin'],
+                    $source
+                )
+            );
+        }
+        $cohort = array_merge($ring, array_slice($texts, 0, 190));
+        $template = analyser::template_bigrams_for_cohort($cohort);
+
+        $a = array_diff_key(question_parser::bigram_set($ring[0]), $template);
+        $b = array_diff_key(question_parser::bigram_set($ring[1]), $template);
+        $this->assertGreaterThan(
+            analyser::S12_REPORT_THRESHOLD,
+            question_parser::jaccard_sets($a, $b),
+            'A ring of 10 in a cohort of 200 is 5% of the activity and must still be reported. '
+            . 'If sampling swallowed it, the sample is too small or the threshold is wrong.'
+        );
+    }
+
+    /**
+     * The shipped comparison must subtract the template from BOTH documents in a pair.
+     *
+     * This guard exists because mutation testing proved it had to. The behavioural tests
+     * for the rule above run on a reimplementation of the pipeline, since this harness has
+     * no database - so deleting the subtraction from cross_student_similarity() itself
+     * passed every one of them. Two mutations went uncaught: dropping it from this
+     * submission's set, and dropping it from the other submission's set.
+     *
+     * analyser_test.php now covers the real function against a real database, which is the
+     * authoritative test. This one is the cheap check that also fires in a bare PHP
+     * environment, and it is deliberately asymmetric-aware: the subtraction must appear on
+     * both sides, because removing it from either one silently restores the defect for every
+     * pair while leaving the other call site looking correct.
+     *
+     * @return void
+     */
+    public function test_the_shipped_comparison_subtracts_the_template_from_both_documents(): void {
+        $src = file_get_contents(__DIR__ . '/../classes/analyser.php');
+
+        // Isolate cross_student_similarity() and strip comments, so neither a neighbouring
+        // method nor an explanatory note can satisfy the assertions below.
+        $from = strpos($src, 'public static function cross_student_similarity');
+        $this->assertNotFalse($from, 'cross_student_similarity() must exist');
+        $to = strpos($src, "\n    public static function", $from + 10);
+        $body = substr($src, $from, $to === false ? null : $to - $from);
+        $code = implode("\n", array_filter(
+            explode("\n", $body),
+            fn($l) => !preg_match('~^\s*(\*|//|/\*)~', $l)
+        ));
+
+        $this->assertSame(
+            2,
+            preg_match_all('/array_diff_key\s*\(\s*\n?\s*question_parser::bigram_set/', $code),
+            'Both documents in a pair must have the template subtracted before they are '
+            . 'compared. Exactly two call sites: this submission, and the one it is being '
+            . 'compared against.'
+        );
+        $this->assertStringContainsString('self::template_bigrams_for_cohort(', $code,
+            'The template set must come from the shared helper, not be rebuilt inline. '
+            . 'report.php must call the same one: it carried its own copy of this pairwise '
+            . 'comparison, so the first version of this fix corrected the per-submission '
+            . 'badge and left the class report listing every innocent pair.');
+        $this->assertMatchesRegularExpression(
+            '/jaccard_sets\s*\(\s*\$bga\s*,\s*\$bgb\s*\)/',
+            $code,
+            'The comparison must run on the two subtracted sets.'
+        );
+        $this->assertDoesNotMatchRegularExpression(
+            '/jaccard_sets\s*\(\s*question_parser::bigram_set/',
+            $code,
+            'Nothing may be compared straight from bigram_set() without subtraction.'
+        );
+    }
+
+    /**
+     * The class report must compare the same way the analyser does.
+     *
+     * report.php does not call cross_student_similarity(). It carries its own pairwise loop,
+     * because it compares every pair in the activity rather than one submission against the
+     * rest. So the first version of the 1.1.5 fix corrected the badge on each submission and
+     * left THIS table - the one a trainer reads before opening a misconduct file - still
+     * listing all 44 innocent pairs of a ten-student cohort.
+     *
+     * Both paths now take the template from analyser::template_bigrams_for_cohort(). This
+     * asserts that report.php still does, and that it honours the cohort floor, because a
+     * page that compares unconditionally will happily print the 50.5% that two independent
+     * answers measure when no template can yet be identified.
+     *
+     * @return void
+     */
+    public function test_the_class_report_subtracts_the_template_and_honours_the_floor(): void {
+        $src  = file_get_contents(__DIR__ . '/../report.php');
+        $code = implode("\n", array_filter(
+            explode("\n", $src),
+            fn($l) => !preg_match('~^\s*(\*|//|/\*)~', $l)
+        ));
+
+        $this->assertStringContainsString('template_bigrams_for_cohort(', $code,
+            'report.php must take the activity template from the shared helper.');
+        /*
+         * Both gates, counted. The page checks the floor twice - once to explain itself
+         * instead of comparing, and once to stay silent rather than claim "no similarities
+         * found" from a comparison it never ran. Asserting only that the constant appears
+         * somewhere in the file is not enough: a mutation that disabled the first gate left
+         * the second one's mention of the constant behind, and the guard passed.
+         */
+        $this->assertSame(
+            2,
+            preg_match_all(
+                '/\$count\s*<\s*\\\\?plagiarism_docguard\\\\analyser::COHORT_MIN_FOR_COMPARISON/',
+                $code
+            ),
+            'report.php must gate on the cohort floor in both places: before comparing, and '
+            . 'before reporting that nothing was found.'
+        );
+        $this->assertDoesNotMatchRegularExpression(
+            '/jaccard_sets\s*\([^)]*question_parser::bigram_set/',
+            $code,
+            'report.php must compare the subtracted sets, never raw bigram sets.'
+        );
+        $this->assertMatchesRegularExpression(
+            '/array_diff_key\s*\(\s*\n?\s*\\\\?plagiarism_docguard\\\\question_parser::bigram_set/',
+            $code,
+            'Each submission\'s set must have the template subtracted before comparison.'
+        );
     }
 }

@@ -95,7 +95,16 @@ $string['privacy:metadata:docguard_sub:submissionid']  = 'The ID of the assignme
 $string['privacy:metadata:docguard_sub:filetype']      = 'The detected document type, PDF or DOCX.';
 $string['privacy:metadata:docguard_sub:contenthash']   = 'The SHA-1 content hash of the submitted file, used to recognise the same document again. It is derived from the file the student uploaded.';
 $string['privacy:metadata:docguard_sub:section_count'] = 'How many sections (questions) were found in the document.';
-$string['privacy:metadata:docguard_sub:analysisjson']  = 'The analysis result for the document: how many sections were found, how much text was extracted, and which scoring model produced the stored score.';
+/*
+ * V1.2.0. This string IS the site's record of processing for this column, printed at
+ * /admin/tool/dataprivacy and shown to a data subject who asks what is held about them. The
+ * authenticity checks added in 1.2.0 put materially more personal data in this column -
+ * verbatim excerpts of the student's writing, a whole sentence of theirs inside each
+ * verification question, and names read out of the submitted file's own metadata, which may
+ * belong to someone other than the student. Describing it as "how many sections were found"
+ * would be a statement to a regulator that is not true.
+ */
+$string['privacy:metadata:docguard_sub:analysisjson']  = 'The analysis result for the document. This includes how many sections were found, how much text was extracted and which scoring model produced the stored score; the authenticity findings, each of which quotes a short passage of the student\'s own writing verbatim as the evidence for that finding; the verification questions generated for the assessor, which quote a sentence from the submission; and the properties the submitted file records about itself, such as the recorded editing time, the number of saves, and the author and last-modified-by names stored in the document — which may name a person other than the student.';
 $string['privacy:metadata:docguard_sub:errormsg']      = 'Why an analysis failed, where it did. It can name the submitted file.';
 $string['privacy:metadata:docguard_sub:timemodified']  = 'The timestamp when the record was last analysed or updated.';
 $string['privacy:metadata:docguard_sec:userid']        = 'The ID of the student whose document this section came from.';
@@ -181,8 +190,35 @@ $string['copyevidencenone']         = 'No other submission to this activity shar
 $string['copyevidencescore']        = 'This submission shares {$a}% of its word pairs with another submission to this activity. Open both and read them before drawing any conclusion: two students answering the same closed question independently measured 13% in testing, and a genuine copy with light paraphrasing measured 92%.';
 $string['scopeexcluded']            = 'Scoring scope: {$a->words} words were set aside before the writing-style signals were measured ({$a->reason}). The signals below describe the student\'s own prose only. Quoted material and reference list entries are written by somebody else, so charging the student for their phrasing would be wrong in both directions — it inflates the score for an honest student who quotes carefully, and it dilutes the score for a submission padded with citations.';
 $string['nosignalsquoted']          = 'No writing-style signals were measured for this section, because almost all of it is quoted or cited material rather than the student\'s own writing — {$a} words were set aside. This is not a low-risk result and it is not an empty submission: there is simply not enough of the student\'s own prose here to measure. Whether that much quotation is acceptable for this task is a marking judgement, not something DocGuard can answer.';
+/*
+ * V1.2.0 authenticity findings.
+ *
+ * Every string here is written to be read by a trainer who may be deciding whether to open a
+ * misconduct file, and by a student who may be contesting it. So: no score, no probability, no
+ * use of the word "detected" about AI, and the limits stated in the panel itself rather than
+ * buried in documentation nobody opens.
+ */
+$string['authheading']              = 'Authenticity checks';
+$string['authtally']                = '{$a->strong} strong, {$a->notable} notable, {$a->context} contextual';
+$string['authnofindings']           = 'No authenticity findings. Nothing in this file was recognisable as a chat-assistant artefact, markdown pasted from elsewhere, or an unverifiable reference. This is not a statement that the work is the student\'s own — these checks only find things that are present, and a submission can be written with AI help and leave none of them behind.';
+$string['authsevstrong']            = 'Strong';
+$string['authsevnotable']           = 'Notable';
+$string['authsevcontext']           = 'Context only';
+$string['authexpectedyears']        = 'An Act of this name exists, but for the year(s): {$a}. A real Act cited with a year that does not exist is a common signature of a reference that was not looked up.';
+$string['authprovheading']          = 'What the file records about how it was made';
+$string['authprovnone']             = 'This file carries no usable metadata. That is not a finding either way — plenty of ordinary tools strip it, and its absence says nothing about who wrote the document.';
+$string['authquestionsheading']     = 'Verification questions';
+$string['authquestionsintro']       = 'Drawn from this submission\'s own wording. If the learner can talk through what they wrote, that settles the question in their favour better than any check above. If they cannot, that is a conversation about competence — which is yours to have, not the software\'s.';
+$string['authlimits']               = '<strong>What these checks can and cannot tell you.</strong> They find things that should not be in an assessment file — a chat assistant\'s own words, markdown from a copy-paste, a citation that does not check out — and they report how the file records its own history. They do <strong>not</strong> detect AI writing, and DocGuard makes no attempt to: the writing-style signals this plugin used to ship flagged 0 of 48 answers generated by ChatGPT, Gemini and Claude, while the highest-scoring document in that test was a human student writing in their second language. A learner who pastes only the answer text, with no framing and no markdown, will produce no findings here. Nothing on this panel is a finding of misconduct on its own, and none of it should be put to a learner as one.';
+$string['paircapped']               = 'This activity has more analysed submissions than the pairwise table compares at once, so the {$a->shown} most recent of {$a->total} are shown here. The similarity figure beside each individual submission is computed when that submission is analysed and is not affected by this — it covers the whole activity. Open a submission to see its own matches.';
 $string['nosimilarities']           = 'No significant cross-student similarities detected.';
 $string['nosimilaritiesthreshold']  = 'No significant similarities detected (threshold: &ge;35% Jaccard).';
+// V1.1.5. The comparison excludes the text the assessment tool supplied to every student,
+// and says so. A trainer taking a pair into a misconduct meeting has to be able to state
+// what the figure measures and what it leaves out, and a student has to be able to question
+// it. A number nobody can interrogate is not evidence.
+$string['comparisonbasis']          = 'Compared across {$a->cohort} submissions, on each student\'s own writing only. Wording carried by {$a->min} or more of these submissions is treated as part of the assessment template and excluded from the comparison ({$a->excluded} phrase pairs excluded here). Cover sheets, student declarations, the question itself and material quoted from the unit resources are not evidence of copying — every student submits them because the assessment tool told them to.';
+$string['toofewforcomparison']      = 'Not enough submissions to compare yet — {$a->count} of the {$a->min} needed. Below {$a->min}, wording shared by two submissions cannot be told apart from the assessment template they were both built on, so no similarity figure is reported rather than one that would be wrong. Measured on two independent answers carrying an ordinary cover sheet and declaration, that figure would have read 50.5%. This section fills in as soon as more students submit.';
 $string['persectionheading']        = 'Per-Section Analysis';
 $string['reanalysebutton']          = 'Re-analyse';
 $string['reanalysecomplete']        = 'Re-analysis complete.';

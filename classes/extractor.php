@@ -213,8 +213,27 @@ class extractor {
             throw new \Exception('Not a valid DOCX file (word/document.xml not found).');
         }
 
+        /*
+         * V1.2.0 hardening. word/document.xml comes out of a file a student uploaded, so it is
+         * hostile input and the parser flags here are a security boundary.
+         *
+         * LIBXML_NONET forbids the parser fetching anything over the network, so a crafted
+         * document cannot make the Moodle server issue an outbound request - the usual version
+         * of that attack points an entity at a cloud instance-metadata endpoint.
+         *
+         * Entity SUBSTITUTION is off because LIBXML_NOENT is NOT passed, and that is what
+         * stops both XXE file disclosure and entity-expansion denial of service. Verified on
+         * PHP 8.4 / libxml 2.9.14: an entity pointing at a local file yields nothing, and a
+         * ten-level billion-laughs bomb produced zero bytes in under a millisecond.
+         *
+         * That default is being relied on, so it is asserted rather than assumed. This plugin
+         * runs on sites whose libxml version nobody here chose, and LIBXML_NOENT looks
+         * innocuous enough that a future reader wanting "&amp;" handled properly might well
+         * add it - which would silently turn file disclosure back on. See
+         * extractor_test::test_docx_xml_parsing_is_hardened_against_entities().
+         */
         $dom = new \DOMDocument();
-        @$dom->loadXML($xml, LIBXML_NOERROR | LIBXML_NOWARNING);
+        @$dom->loadXML($xml, LIBXML_NOERROR | LIBXML_NOWARNING | LIBXML_NONET);
 
         $ns         = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
         $paragraphs = $dom->getElementsByTagNameNS($ns, 'p');

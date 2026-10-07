@@ -8,7 +8,7 @@
 
 ---
 
-# DocGuard — Document Plagiarism and AI-Use Checker
+# DocGuard — Assessment Authenticity Review for Moodle
 
 **Version:** see `version.php` and the top of [CHANGELOG.md](CHANGELOG.md) - deliberately not repeated here, so it cannot go stale
 **Moodle Compatibility:** Moodle 4.4 - 5.2 (`$plugin->requires = 2024042200`, `$plugin->supported = [404, 502]`)
@@ -32,13 +32,20 @@ Teachers see a similarity badge next to each submitted file, a class report list
 flagged pair, and a per-student report showing the extracted text and which other
 submissions it overlaps with.
 
+Since 1.2.0 it also runs **authenticity checks** on the submitted file: things that are true
+or false about the document, such as a chat assistant's own words left in the text, markdown
+pasted from somewhere else, a citation to an Act that does not check out, and what the file
+records about how it was made. These are reported individually with the evidence quoted, and
+they carry **no score**.
+
 DocGuard is a **decision-support tool**. A similarity figure is a reason to open both
 submissions and read them. It is not a finding of misconduct, and every report says so.
 
-Releases up to 1.0.98 also scored each submission across eleven writing-style signals as an
-AI-writing indicator. Those signals were tested against 48 answers written by three current
-language models and flagged none of them, while the highest-scoring document in the test
-set was a human second-language student. They were removed in 1.0.99. See
+**DocGuard does not detect AI writing, and does not claim to.** Releases up to 1.0.98 scored
+each submission across eleven writing-style signals as an AI-writing indicator. Those signals
+were tested against 48 answers written by three current language models and flagged **none** of
+them, while the highest-scoring document in the test set was a **human second-language
+student**. They were removed in 1.0.99 and nothing has replaced them. See
 **What DocGuard Checks** below.
 ---
 
@@ -173,12 +180,12 @@ score in an academic integrity process.
 
 ## What DocGuard Checks
 
-DocGuard performs **one** check: it compares every submission in an activity against every
-other submission, and reports the overlap.
+Two separate things, reported separately and never combined into one number.
 
 | | What it is | Status |
 |---|---|---|
-| Cross-submission similarity | Jaccard similarity over word bigrams, after quotations and the reference list are removed | **This is the product** |
+| Cross-submission similarity | Jaccard similarity over word bigrams, after quotations, the reference list and the activity's shared assessment template are removed | **This is the product** |
+| Authenticity findings | Checks on the submitted file that are true or false: chat-assistant artefacts, markdown in a word-processed document, unverifiable legislation citations, and what the file records about how it was made | Added in 1.2.0 |
 | Text extraction | PDF (pdftotext / Ghostscript) and DOCX, with a readability check and a non-Latin-script guard | Supporting |
 
 **Score = similarity percentage.** A submission scored 78 shares 78% of its word pairs with
@@ -197,6 +204,49 @@ students who quote the same legislation or textbook passage share wording that n
 them wrote: measured on two unrelated answers carrying one shared quotation, similarity was
 **47.5% with the quotation left in — above the reporting threshold, a false copy match —
 and 0.0% with it removed.**
+
+### The assessment template is excluded (1.1.5)
+
+A real RTO submission carries the assessment tool's own text — the cover sheet, the RTO code,
+the instructions, the misconduct declaration, the question. Every student submits it because the
+template told them to, so it is not evidence about anybody. Measured on a ten-student cohort
+with one ordinary 185-word cover sheet, counting it made **44 of 44 innocent pairs** read as
+matches, and two students answering **different units** reached 48% on the cover sheet alone.
+
+Wording carried by at least a third of an activity's submissions is treated as template and
+removed before comparison. On that cohort the real copy pair holds at 90.9% and the worst
+innocent pair falls to 9.2%.
+
+**No pair is reported until an activity has three submissions.** With two documents, shared
+wording is either the template or a copy and nothing in the data separates them — two
+independent answers on a cover sheet measure 50.5%. The report says so, and fills in when the
+third student submits.
+
+### Authenticity findings (1.2.0)
+
+Reported individually, each with its severity and the evidence quoted. **There is no composite
+score**, because weighting these against one another needs calibration against real student
+submissions and inventing weights is how the pre-1.0.99 badge became a confident number built
+from signals that discriminated nothing.
+
+| Check | Severity | Notes |
+|---|---|---|
+| Chat-assistant artefacts, prompt remnants | **strong** | A student would have to type the assistant's own words |
+| Markdown in a word-processed document | notable | Never strong: honest drafting in a notes app produces it |
+| Legislation not in the recognised list | notable | **Unrecognised, not fabricated** — the list is curated, not the statute book |
+| A real Act cited with a year it never had | **strong** | A common signature of a reference that was not looked up |
+| What the file records about itself | context only | Editing minutes, saves, created-to-modified span, PDF producer |
+
+**These checks find evidence of pasting, not evidence of AI authorship.** Measured: 0 findings
+across all 73 corpus documents, including 48 generated by ChatGPT, Gemini and Claude, because
+those were stored as clean answer text. Run against the **raw** chat output as it leaves the
+interface, the same checks produced 10 strong findings for ChatGPT and 10 for Gemini. A learner
+who pastes only the answer body leaves nothing behind. The report panel says this itself.
+
+Each submission also gets **verification questions** drawn from the learner's own wording. If a
+learner can explain what they submitted, that settles the question in their favour better than
+any check above; if they cannot, that is a conversation about competence, which is the
+assessor's to have and not the software's.
 
 ### Scope, stated plainly
 

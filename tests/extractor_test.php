@@ -503,4 +503,81 @@ final class extractor_test extends \advanced_testcase {
         exec('which pdftotext 2>/dev/null', $output, $retval);
         return $retval === 0 && !empty($output);
     }
+
+    /**
+     * The .docx XML parser must not resolve entities, and must not touch the network.
+     *
+     * V1.2.0. word/document.xml comes out of a file a student uploaded, so the libxml flags
+     * passed to loadXML() are a security boundary. Entity substitution being off is what stops
+     * XXE file disclosure and entity-expansion denial of service, and it is off only because
+     * LIBXML_NOENT is not passed - a default this code relies on.
+     *
+     * That default is asserted rather than assumed. This plugin runs on sites whose libxml
+     * version nobody here chose, and LIBXML_NOENT looks innocuous enough that a future reader
+     * wanting "&amp;" handled properly might add it, silently turning file disclosure back on.
+     *
+     * @return void
+     */
+    public function test_docx_xml_parsing_is_hardened_against_entities(): void {
+        $this->resetAfterTest();
+        if (!class_exists('ZipArchive')) {
+            $this->markTestSkipped('ZipArchive is required to build a .docx.');
+        }
+        $dir = make_request_directory();
+        $ns  = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+
+        $build = function (string $xml) use ($dir): string {
+            $path = $dir . '/' . uniqid('x') . '.docx';
+            $zip = new \ZipArchive();
+            $zip->open($path, \ZipArchive::CREATE);
+            $zip->addFromString('word/document.xml', $xml);
+            $zip->close();
+            return $path;
+        };
+        $extract = new \ReflectionMethod(extractor::class, 'extract_docx');
+        $extract->setAccessible(true);
+
+        // A local-file entity must yield nothing. If this ever fails, the contents of a server
+        // file are being written into normtext and shown in the trainer's report.
+        $secret = $dir . '/secret.txt';
+        file_put_contents($secret, 'TOPSECRETCANARY');
+        $xxe = $build('<?xml version="1.0"?><!DOCTYPE d [<!ENTITY xxe SYSTEM "file://' . $secret . '">]>'
+            . '<w:document ' . $ns . '><w:p>LEAK:&xxe;</w:p></w:document>');
+        $out = (string)$extract->invoke(null, $xxe);
+        $this->assertStringNotContainsString('TOPSECRETCANARY', $out,
+            'XXE: a local file was read into the extracted text.');
+
+        // Entity expansion must not blow up. Ten levels of ten is 10^10 characters if expanded.
+        $entities = '<!ENTITY a0 "DOS">';
+        for ($i = 1; $i < 10; $i++) {
+            $entities .= '<!ENTITY a' . $i . ' "' . str_repeat('&a' . ($i - 1) . ';', 10) . '">';
+        }
+        $bomb = $build('<?xml version="1.0"?><!DOCTYPE d [' . $entities . ']>'
+            . '<w:document ' . $ns . '><w:p>&a9;</w:p></w:document>');
+        $started = microtime(true);
+        $out = (string)$extract->invoke(null, $bomb);
+        $elapsed = microtime(true) - $started;
+        $this->assertLessThan(5, $elapsed, 'Entity expansion took too long: a crafted upload '
+            . 'can occupy the cron indefinitely.');
+        $this->assertLessThan(100000, strlen($out), 'Entities were expanded.');
+
+        // And the flags themselves, so the guarantee is explicit.
+        $src = file_get_contents(__DIR__ . '/../classes/extractor.php');
+        $code = implode("\n", array_filter(
+            explode("\n", $src),
+            fn($l) => !preg_match('~^\s*(\*|//|/\*)~', $l)
+        ));
+        $this->assertStringContainsString('LIBXML_NONET', $code,
+            'loadXML() must forbid network access on student-supplied XML.');
+        $this->assertStringNotContainsString('LIBXML_NOENT', $code,
+            'LIBXML_NOENT turns on entity substitution, which is XXE and billion-laughs.');
+        $this->assertStringNotContainsString('LIBXML_DTDLOAD', $code,
+            'LIBXML_DTDLOAD fetches external DTDs.');
+
+        // A normal document must still extract, or this hardening broke the product.
+        $ok = $build('<?xml version="1.0"?><w:document ' . $ns . '>'
+            . '<w:p>The worker must report the hazard to the supervisor.</w:p></w:document>');
+        $this->assertStringContainsString('report the hazard',
+            (string)$extract->invoke(null, $ok));
+    }
 }

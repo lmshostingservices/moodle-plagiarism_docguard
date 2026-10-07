@@ -259,6 +259,44 @@ class provider implements core_userlist_provider, metadata_provider, plugin_prov
                 // request that under-discloses relative to the controller's own published
                 // record of processing is exactly what this API exists to prevent, and it
                 // matters most for the student who is contesting a misconduct referral.
+                /*
+                 * V1.2.0: the authenticity findings, which live inside analysisjson.
+                 *
+                 * get_metadata() has declared analysisjson since 1.0.95 and this export did
+                 * not include it, which was already a gap. 1.2.0 made it a material one: the
+                 * column now holds the authenticity findings, each quoting up to 180
+                 * characters of the student's own writing verbatim, the verification
+                 * questions - which embed a whole sentence of theirs - and names read out of
+                 * the submitted document's metadata.
+                 *
+                 * That is precisely the material a student contesting a misconduct referral
+                 * needs to see, and it is the reason the comment above this one exists. It is
+                 * exported in the structured form the report shows rather than as raw JSON,
+                 * because a subject access response has to be readable by its subject.
+                 */
+                $analysis = json_decode((string)$sub->analysisjson, true);
+                $authenticity = null;
+                if (is_array($analysis) && !empty($analysis['authenticity'])) {
+                    $auth = $analysis['authenticity'];
+                    $authenticity = [
+                        'checks_version' => $auth['checks_version'] ?? null,
+                        'findings'       => array_values(array_map(static function ($finding) {
+                            return [
+                                'check'      => $finding['check'] ?? '',
+                                'severity'   => $finding['severity'] ?? '',
+                                'what'       => $finding['label'] ?? '',
+                                'matched'    => $finding['matched'] ?? '',
+                                'your_text'  => $finding['evidence'] ?? '',
+                            ];
+                        }, (array)($auth['findings'] ?? []))),
+                        'document_metadata'     => (array)($auth['provenance']['fields'] ?? []),
+                        'verification_questions' => array_values(array_map(
+                            static fn($q) => $q['question'] ?? '',
+                            (array)($auth['questions'] ?? [])
+                        )),
+                    ];
+                }
+
                 $export[] = [
                     'filename'          => $sub->filename,
                     'filetype'          => $sub->filetype,
@@ -267,6 +305,7 @@ class provider implements core_userlist_provider, metadata_provider, plugin_prov
                     'status'            => $sub->status,
                     'errormsg'          => $sub->errormsg ?? '',
                     'extracted_text'    => $sub->normtext,
+                    'authenticity'      => $authenticity,
                     'timecreated'       => transform::datetime($sub->timecreated),
                     'sections'          => array_values(
                         array_map(function ($sec) {

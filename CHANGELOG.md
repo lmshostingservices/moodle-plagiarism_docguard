@@ -1,5 +1,268 @@
 # Changelog
 
+## 1.2.1 - 2026-10-07
+
+**Pre-release audit of 1.2.0 — six defects.** Version `2026102000`. No schema change, no data
+change. 1.2.0's own test suite passed throughout; these were found by attacking it.
+
+### The evidence was quoted from the wrong part of the document
+
+`preg_match()` with `PREG_OFFSET_CAPTURE` returns **byte** offsets, with or without `/u`.
+`evidence()` cut the quoted window with `core_text::substr()`, which counts **characters**, so
+the excerpt drifted one position for every multi-byte character earlier in the document.
+
+| Multi-byte drift | Evidence shown |
+|---|---|
+| 35 bytes | correct — the 180-character window absorbed it |
+| **140 bytes** | **empty** |
+| 420–5,600 bytes | text from an unrelated part of the submission |
+
+140 bytes is about 45 accented letters, or a couple of dozen uses of `°C`. A learner called Zoë
+describing a café fridge reaches it inside one paragraph. The authenticity panel's entire claim
+is that its evidence is quoted so it can be checked, so this was the worst of the six.
+
+Now cut with byte functions, with the window start swept to a character boundary. A damaged
+extraction keeps its readable part instead of producing nothing.
+
+### A crafted upload could destroy its own analysis
+
+Provenance values were stored at whatever length the submitted file declared. A `.docx`
+carrying a 500 KB `dc:creator` was stored verbatim — measured at 1 KB, 20 KB, 100 KB and
+500 KB, all stored in full. `analysisjson` is a TEXT column, 65,535 bytes on MySQL, so the row
+write fails and that submission's analysis is lost.
+
+Capped at 256 characters (`PROVENANCE_FIELD_MAX`), multi-byte-safe, with control characters
+stripped. Findings are computed **before** truncation so timestamps still parse.
+
+### The privacy registry under-declared what is stored
+
+1.2.0 began storing verbatim passages of the student's writing, a whole sentence of theirs
+inside each verification question, and the author and last-modified-by names read out of the
+submitted file — **which may name a person other than the student**. The registry entry for
+`analysisjson` still described "how many sections were found, how much text was extracted, and
+which scoring model produced the stored score".
+
+That string is the site's record of processing under Article 30 and what a data subject is
+shown when they ask what is held about them. This is the same failure `get_metadata()`'s own
+comment block was written to prevent in 1.0.95. Rewritten to describe the data accurately.
+
+### The export withheld the findings from the student they are about
+
+`export_user_data()` did not return the authenticity block, so a student contesting a
+misconduct referral could not obtain the evidence quoted against them — while the site's
+registry stated that DocGuard held it. Now exported in readable structured form, with a null
+block for rows analysed before 1.2.0 rather than an empty one that would read as "checked,
+nothing found".
+
+### Large activities exhausted cron memory
+
+Deriving the activity template read every submission at once.
+
+| Cohort, all at the 65,000-character normtext cap | 1.2.0 | 1.2.1 |
+|---|---|---|
+| 30 | 46 MB | 46 MB |
+| 100 | **172 MB** | 92 MB |
+| 200 | 180 MB | 104 MB |
+| 400 | not measured | 116 MB / 2.3 s |
+
+Moodle cron commonly runs with a 256 MB limit and has its own baseline on top. Exhausting it
+leaves the submission at `pending` and retries it on every cron run, forever.
+
+The template is a **proportion** — text carried by a third or more of the submissions — and a
+sample estimates a proportion. It is now derived from at most 60 submissions
+(`TEMPLATE_SAMPLE_MAX`). Measured on a 200-submission cohort, a sample of 12 produced a
+bit-for-bit identical template.
+
+Sampled by **stride**, not by taking the first N: an assessment tool reissued partway through a
+cohort would otherwise never be recognised, leaving every pair in the second half inflated.
+**Deterministic**, never random: a score a trainer cannot reproduce is not evidence.
+
+`report.php` also held every submission's word-pair set at once. On realistic submissions this
+is a non-issue — 250 rows of 4,000-word assessments peaked at 22 MB, because ordinary prose
+repeats itself — but on near-unique text it reached 116 MB at 100 rows. The pairwise table is
+now capped at 300 rows and says so on the page, rather than white-screening with no
+explanation. The per-submission badges are computed at analysis time, are unaffected, and
+remain complete.
+
+### XML hardening on student-supplied input
+
+`loadXML()` on `word/document.xml` ran without `LIBXML_NONET`. Tested on PHP 8.4 / libxml
+2.9.14: an entity pointing at a local file yields nothing and a ten-level billion-laughs bomb
+produces zero bytes in under a millisecond, because entity substitution is off unless
+`LIBXML_NOENT` is passed. That was defence by default on sites whose libxml version nobody here
+chose. `LIBXML_NONET` is now explicit, and a test asserts `LIBXML_NOENT` is **absent** — it
+looks innocuous, and adding it would silently turn file disclosure back on.
+
+### Attacked and found clean
+
+Hostile `.docx` metadata carrying `<script>`, `<img onerror>` and `<svg onload>` (stored
+verbatim, which is correct — the report must be able to show that a file was tampered with —
+and escaped at output). Regular-expression backtracking across ten adversarial inputs including
+390 kB of prose and long runs of capitalised words against the Act-title pattern: worst case
+15 ms. Empty, whitespace-only, invalid UTF-8, null bytes, CRLF, RTL, CJK, emoji, zero-width and
+HTML input: no exceptions, no `json_encode` failures.
+
+### Two tests that could not fail for the reason they named
+
+Both found by mutation testing, and both worth recording because a passing test that cannot
+fail is worse than no test:
+
+- The multi-byte fixture **never actually misaligned the window**. Rebuilt with the byte
+  arithmetic made explicit. It then failed for an unrelated reason: padding with `x` put a word
+  character immediately before "As an AI language model", removing the `\b` boundary the pattern
+  needs, so nothing matched at all. Spaces instead.
+- The "two different templates" fixture used two **nearly identical** templates — 71% shared
+  word pairs — so the sampling tests passed even when the sampling was mutated to take the
+  oldest submissions, or randomised. Rewritten with a genuinely different reissued tool.
+
+**106 tests passing, 0 failing. 36 of 36 mutations caught across three sets. 0 findings across
+all 73 corpus documents, including three second-language submissions.**
+
+---
+
+## 1.2.0 - 2026-10-07
+
+**Authenticity checks.** Version `2026101900`. No schema change.
+
+Checks on the submitted Word document or PDF for things that are **true or false about the
+file**, reported individually with their evidence quoted. **No score**, and the reasons for
+that are in `classes/authenticity.php`.
+
+| Check | Severity | What it is |
+|---|---|---|
+| Chat-assistant artefacts and prompt remnants | **strong** | "As an AI language model", "Certainly!", "Here is a 150–200 word response", "Word count: 187" |
+| Markdown inside a word-processed document | notable | `###`, `**bold**`, `*` bullets — never strong, because honest drafting in a notes app produces it |
+| Legislation not in the recognised list | notable | Reported as **unrecognised**, never as fabricated: the registry is a curated list, not the statute book |
+| A real Act cited with a year it never had | **strong** | A common signature of a reference that was not looked up |
+| What the file records about itself | context only | Editing minutes, revision count, created-to-modified span, PDF producer |
+| Verification questions | — | Generated from the learner's own wording, no model involved |
+
+### Why nothing here measures how the writing reads
+
+Three separate measurements ruled style analysis out:
+
+1. The marker-word signals shipped to 1.0.98 flagged **0 of 48** answers generated by ChatGPT,
+   Gemini and Claude, and found **zero markers in 48 of 48**. The highest-scoring document in
+   that test was a **human student writing in their second language**.
+2. Style statistics as absolute measures do not separate the classes: across eight measures the
+   overlap between the human and AI ranges ran **25% to 100%**, and the one that looked usable
+   rested on a human baseline of eight documents.
+3. Comparing windows **within** a single document — the approach needing no baseline, and the
+   most promising on paper — fails at assessment-answer length. Splitting 59 documents in half
+   and comparing each author with themselves, one author's own variation reached **36%** on mean
+   sentence length at the 90th percentile, where the **median** difference between two
+   *different* authors was **20%**. The same held for word length (17% vs 16%), vocabulary
+   diversity (14% vs 8%) and long-word rate (90% vs 61%). A detector built on it flags normal
+   writers for having written one answer in a hurry.
+
+### What these checks will and will not tell you
+
+Measured: **0 findings across all 73 corpus documents**, including 48 generated by ChatGPT,
+Gemini and Claude — because those were stored as clean answer text. Run against the **raw** chat
+output as it came out of the interface, the same checks produced 10 strong and 1 notable finding
+for ChatGPT and 10 strong for Gemini.
+
+So these checks find **evidence of pasting, not evidence of AI authorship**. A learner who
+pastes only the answer body, with no framing and no markdown, produces nothing here. That limit
+is printed in the report panel itself, not only in documentation.
+
+### There is no composite score
+
+Findings are listed individually, each with its severity and its evidence quoted. A weighted
+total would require calibration against real student submissions, which this plugin has never
+had, and inventing weights is exactly how the pre-1.0.99 badge became a confident number derived
+entirely from signals that discriminated nothing. `overall_riskscore` remains the copy-similarity
+percentage and nothing else.
+
+A removed check is worth recording: a unit-of-competency **code format check** was written and
+then deleted before release. It rejected `SITXFSA005` and `SITXFSA006` — seven letters, both
+entirely valid — and widening it to cover the real spread across training packages makes it
+almost identical to the pattern used to find candidates, so it would approve everything while
+appearing to verify something. Code verification belongs with a `training.gov.au` lookup.
+
+### No backfill
+
+Findings are produced during analysis, from the submitted file, because provenance needs the
+file itself and the text checks need the raw extraction rather than the normalised text that is
+stored. Rows analysed under earlier releases have no authenticity section and the report omits
+the panel for them — it does not show an empty one, which would read as "checked, nothing
+found". Re-analysing a submission produces the findings.
+
+---
+
+## 1.1.5 - 2026-10-07
+
+**The assessment template was counting as copying.** Version `2026101800`. No schema change;
+the upgrade step retracts scores that are wrong.
+
+Similarity was measured over everything the extractor returned, which on a real RTO submission
+includes the assessment tool's own text — the cover sheet, the RTO code, the instructions to the
+student, the academic misconduct declaration, the question itself. Every student submits that
+text because the template told them to. It was never evidence about anybody.
+
+| Scenario, measured | Before |
+|---|---|
+| Two independent answers, same task, ordinary 185-word cover sheet | **50.5% — MEDIUM, reported as a match** |
+| Two answers to **different units**, same cover sheet | **48.0% — reported as a match** |
+| Ten-student cohort on one template | **44 of 44 innocent pairs flagged**, worst at 57.9% |
+
+On any RTO using a standard assessment template — which is all of them — this flagged the entire
+class. Earlier testing missed it because every fixture was bare answer text, which is not what an
+RTO submits. The live site did not show it either: its rows predate the similarity score entirely.
+
+### The fix
+
+Text carried by at least a third of an activity's submissions (never fewer than three) is the
+template, and is subtracted before any pair is compared. On the same cohort the real copy pair
+holds at **90.9%**, the worst innocent pair falls to **9.2%**, and the false matches go from 44
+to **none**.
+
+**A third of the cohort, not a fixed count of three.** A fixed three was tried first and is
+actively dangerous: in a cohort of 30 with three students copying one another, their shared text
+appears in three submissions, so the rule subtracts precisely the evidence of the collusion.
+
+| Cohort / ring | fixed ≥3 | a third of the cohort |
+|---|---|---|
+| 12 / 3 | 1 of 3 ring pairs | **3 of 3** |
+| 30 / 3 | 1 of 3 | **3 of 3** |
+| 30 / 6 | 0 of 15 | **15 of 15** |
+| 40 / 4 | 2 of 6 | **6 of 6** |
+| 48 / 5 | 1 of 10 | **10 of 10** |
+| false positives, all scenarios | 0 | **0 in 3,000+ innocent pairs** |
+
+The honest limit: collusion involving a third or more of the cohort suppresses part of its own
+evidence — a ring of 10 at n=30 showed 20 of its 45 pairs, not all 45. It is not hidden, and no
+common-text method does better. The class report states the cohort size and the threshold used so
+the figure can be interrogated rather than taken on trust.
+
+### Nothing is reported below three submissions
+
+With two documents, wording in both is either the assessment template or one student's copy of
+the other, and nothing in the data separates them. Two independent answers on an ordinary cover
+sheet measure **50.5%**. That number is wrong rather than imprecise, so none is reported and the
+report says why. The activity corrects itself when the third student submits.
+
+### The class report had its own copy of the comparison
+
+`report.php` did not call `cross_student_similarity()` — it carried its own pairwise loop. So the
+first version of this fix corrected the badge on each submission and left the table a trainer
+actually reads before opening a misconduct file still listing all 44 innocent pairs. Both paths
+now take the template from one function. This is the same duplicated-logic trap that produced the
+`fullname()` bug in 1.1.4, in the same file.
+
+### The upgrade retracts rather than relabels
+
+Every score written under the previous model is mostly template on a templated activity. The
+reports already label a superseded model, but a stale MEDIUM or HIGH badge beside an innocent
+student's name is not made harmless by a label — the badge is the thing a trainer acts on. Model
+2 scores are cleared and their rows returned to the queue for re-analysis. Rows whose file has
+already been pruned by the retention setting stay unscored: no score is honest, and a score known
+to be inflated is not.
+
+`SCORE_MODEL` is now 3.
+
+---
+
 ## 1.1.4 - 2026-10-06
 
 **`fullname()` was being handed an incomplete user record.** Version `2026101700`. No schema

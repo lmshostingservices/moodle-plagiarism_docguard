@@ -540,6 +540,129 @@ echo '<strong>' . s(get_string('scopeheading', 'plagiarism_docguard')) . '</stro
 echo get_string('scopenote', 'plagiarism_docguard');
 echo '</div>';
 
+/* ── Authenticity findings (V1.2.0) ──────────────────────────────────────────── */
+
+/*
+ * A SEPARATE panel, deliberately, with no score and no band colour.
+ *
+ * These findings answer a different question from the similarity figure above - "is there
+ * anything in this file that should not be here, and do its references check out" rather than
+ * "does this match another submission" - and folding them into one number would make both
+ * unreadable. The previous version of this plugin showed a single confident badge derived
+ * from style signals that measured nothing; a count of findings, each with its evidence
+ * quoted, is what a trainer can act on and what a student can contest.
+ *
+ * There is no composite score here and there will not be one until these checks have been
+ * calibrated against real student submissions.
+ */
+$dgauth = $dganalysis['authenticity'] ?? null;
+
+if (is_array($dgauth)) {
+    $dgfindings = $dgauth['findings'] ?? [];
+    $dgtally    = $dgauth['tally'] ?? ['strong' => 0, 'notable' => 0, 'context' => 0];
+    $dgprov     = $dgauth['provenance'] ?? ['available' => false, 'fields' => []];
+
+    echo '<div style="border:1px solid #e5e7eb;border-radius:8px;margin-top:1.75rem;overflow:hidden;">';
+    echo '<div style="background:#f9fafb;border-bottom:1px solid #e5e7eb;padding:0.85rem 1.25rem;">';
+    echo '<div style="font-size:0.72rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;'
+        . 'color:#6b7280;">' . s(get_string('authheading', 'plagiarism_docguard')) . '</div>';
+    echo '<div style="font-size:0.95rem;font-weight:700;color:#374151;margin-top:0.2rem;">'
+        . s(get_string('authtally', 'plagiarism_docguard', (object)[
+            'strong'  => (int)($dgtally['strong'] ?? 0),
+            'notable' => (int)($dgtally['notable'] ?? 0),
+            'context' => (int)($dgtally['context'] ?? 0),
+        ])) . '</div>';
+    echo '</div>';
+
+    echo '<div style="padding:1.1rem 1.25rem;">';
+
+    if (empty($dgfindings)) {
+        echo '<p style="margin:0 0 0.75rem;font-size:0.86rem;color:#374151;line-height:1.6;">'
+            . get_string('authnofindings', 'plagiarism_docguard') . '</p>';
+    } else {
+        $dgsevcolour = ['strong' => '#b71c1c', 'notable' => '#e65100', 'context' => '#6b7280'];
+        $dgsevlabel  = [
+            'strong'  => get_string('authsevstrong', 'plagiarism_docguard'),
+            'notable' => get_string('authsevnotable', 'plagiarism_docguard'),
+            'context' => get_string('authsevcontext', 'plagiarism_docguard'),
+        ];
+        echo '<ul style="list-style:none;margin:0 0 1rem;padding:0;">';
+        foreach ($dgfindings as $dgf) {
+            $dgsev = (string)($dgf['severity'] ?? 'context');
+            $dgcol = $dgsevcolour[$dgsev] ?? '#6b7280';
+            echo '<li style="border-left:3px solid ' . $dgcol . ';padding:0.5rem 0 0.5rem 0.85rem;'
+                . 'margin-bottom:0.85rem;">';
+            echo '<div style="font-size:0.74rem;font-weight:700;text-transform:uppercase;'
+                . 'letter-spacing:0.04em;color:' . $dgcol . ';">'
+                . s($dgsevlabel[$dgsev] ?? $dgsev) . '</div>';
+            echo '<div style="font-size:0.88rem;font-weight:600;color:#374151;margin:0.1rem 0;">'
+                . s((string)($dgf['label'] ?? ''))
+                . (!empty($dgf['count']) && (int)$dgf['count'] > 1
+                    ? ' <span style="font-weight:400;color:#6b7280;">(&times;'
+                        . (int)$dgf['count'] . ')</span>'
+                    : '')
+                . '</div>';
+            if (!empty($dgf['matched'])) {
+                echo '<div style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:0.8rem;'
+                    . 'color:#1f2937;background:#f3f4f6;border-radius:4px;padding:0.3rem 0.5rem;'
+                    . 'margin:0.25rem 0;display:inline-block;max-width:100%;overflow-wrap:anywhere;">'
+                    . s((string)$dgf['matched']) . '</div>';
+            }
+            if (!empty($dgf['expected'])) {
+                echo '<div style="font-size:0.82rem;color:#374151;">'
+                    . s(get_string('authexpectedyears', 'plagiarism_docguard', (string)$dgf['expected']))
+                    . '</div>';
+            }
+            if (!empty($dgf['evidence'])) {
+                echo '<div style="font-size:0.82rem;color:#6b7280;line-height:1.55;margin-top:0.2rem;'
+                    . 'font-style:italic;">' . s((string)$dgf['evidence']) . '</div>';
+            }
+            echo '</li>';
+        }
+        echo '</ul>';
+    }
+
+    // What the file records about how it was made. Facts, laid out as facts.
+    echo '<div style="border-top:1px solid #f3f4f6;padding-top:0.9rem;">';
+    echo '<div style="font-size:0.78rem;font-weight:700;color:#374151;margin-bottom:0.35rem;">'
+        . s(get_string('authprovheading', 'plagiarism_docguard')) . '</div>';
+    if (empty($dgprov['available']) || empty($dgprov['fields'])) {
+        echo '<p style="margin:0;font-size:0.83rem;color:#6b7280;line-height:1.55;">'
+            . get_string('authprovnone', 'plagiarism_docguard') . '</p>';
+    } else {
+        echo '<table style="font-size:0.83rem;color:#374151;border-collapse:collapse;">';
+        foreach ((array)$dgprov['fields'] as $dgk => $dgv) {
+            echo '<tr><td style="padding:0.15rem 0.9rem 0.15rem 0;color:#6b7280;white-space:nowrap;">'
+                . s(str_replace('_', ' ', (string)$dgk)) . '</td>'
+                . '<td style="padding:0.15rem 0;overflow-wrap:anywhere;">' . s((string)$dgv) . '</td></tr>';
+        }
+        echo '</table>';
+    }
+    echo '</div>';
+
+    // Verification questions: the part of this panel that actually settles things.
+    if (!empty($dgauth['questions'])) {
+        echo '<div style="border-top:1px solid #f3f4f6;margin-top:0.9rem;padding-top:0.9rem;">';
+        echo '<div style="font-size:0.78rem;font-weight:700;color:#374151;margin-bottom:0.2rem;">'
+            . s(get_string('authquestionsheading', 'plagiarism_docguard')) . '</div>';
+        echo '<p style="margin:0 0 0.5rem;font-size:0.82rem;color:#6b7280;line-height:1.55;">'
+            . get_string('authquestionsintro', 'plagiarism_docguard') . '</p>';
+        echo '<ol style="margin:0;padding-left:1.25rem;font-size:0.86rem;color:#374151;line-height:1.6;">';
+        foreach ((array)$dgauth['questions'] as $dgq) {
+            echo '<li style="margin-bottom:0.4rem;">' . s((string)($dgq['question'] ?? '')) . '</li>';
+        }
+        echo '</ol>';
+        echo '</div>';
+    }
+
+    // The limits, in the product, where a trainer reads them - not only in a manual.
+    echo '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;'
+        . 'padding:0.8rem 1rem;margin-top:1rem;font-size:0.82rem;color:#78350f;line-height:1.6;">'
+        . get_string('authlimits', 'plagiarism_docguard') . '</div>';
+
+    echo '</div></div>';
+}
+
 /* ── Interpretation guide ────────────────────────────────────────────────────── */
 
 echo '<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:1rem '

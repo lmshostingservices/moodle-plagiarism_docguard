@@ -214,11 +214,42 @@ class analyser {
         $forcomparison = self::prepare_for_scoring($text);
         $norm          = question_parser::normalise_for_similarity($forcomparison['text']);
 
+        /*
+         * V1.2.0: authenticity findings.
+         *
+         * Checks on the submitted file that are true or false - artefacts from a chat tool,
+         * markdown in a word-processed document, citations that cannot be verified, and what
+         * the file records about how it was made. No style measurement of any kind, and no
+         * score: see the class comment on \plagiarism_docguard\authenticity for the three
+         * separate measurements that ruled style analysis out.
+         *
+         * Findings are stored as evidence on the row. They do not touch overall_riskscore,
+         * which remains the copy-similarity percentage and nothing else, because mixing an
+         * authenticity finding into a similarity number would make both unreadable.
+         */
+        $authfindings = authenticity::text_findings($text);
+        $provenance   = self::file_provenance($file, str_word_count($text));
+        if (!empty($provenance['findings'])) {
+            $authfindings = authenticity::sort_findings(
+                array_merge($authfindings, $provenance['findings'])
+            );
+        }
+
         $analysis = [
             'section_count'    => count($scoredsections),
             'overall_score'    => $overallscore,
             'overall_level'    => $overalllevel,
             'extraction_chars' => strlen($text),
+            'authenticity'     => [
+                'findings'   => $authfindings,
+                'tally'      => authenticity::tally($authfindings),
+                'provenance' => [
+                    'available' => (bool)($provenance['available'] ?? false),
+                    'fields'    => $provenance['fields'] ?? [],
+                ],
+                'questions'  => authenticity::verification_questions($text),
+                'checks_version' => authenticity::CHECKS_VERSION,
+            ],
             /*
              * V1.0.99. What the stored score MEANS, stamped on the row.
              *
@@ -506,8 +537,32 @@ class analyser {
 
 
     /**
-     * Compute cross-student Jaccard similarity between this submission and all others.
-     * Returns array of ['userid', 'username', 'fullname', 'similarity', 'subid'].
+     * Compute cross-student similarity between this submission and all others, on the
+     * students' own writing only.
+     *
+     * V1.1.5 FIX-DG-SHARED-TEMPLATE-INFLATES-EVERY-PAIR. Until this release the comparison
+     * ran over whatever the extractor pulled out of the file, which on a real RTO submission
+     * includes the assessment tool's own text: the cover sheet, the RTO code, the
+     * instructions to the student, the misconduct declaration and the question itself. Every
+     * student submits that text, because the template told them to.
+     *
+     * Measured on a 10-student cohort carrying one ordinary cover sheet and declaration:
+     * 44 of the 44 innocent pairs scored above the reporting threshold, the worst at 57.9%,
+     * and two students answering DIFFERENT UNITS scored 48.0% on the strength of the cover
+     * sheet alone. The plugin would have handed a trainer the entire class as copy matches.
+     * This was not visible in earlier testing because the fixtures were bare answer text,
+     * which no RTO submits.
+     *
+     * So the activity's shared text is subtracted before anything is compared. What survives
+     * is the writing the student actually did, which is the only thing a misconduct question
+     * can fairly be about. On the same cohort: the real copy pair holds at 90.9%, the worst
+     * innocent pair falls to 9.2%, and the false matches go from 44 to none.
+     *
+     * Document frequencies are accumulated one submission at a time and each bigram set is
+     * discarded as soon as it has been counted, so peak memory stays at one set plus the
+     * activity's vocabulary rather than every submission's set at once. The sets are rebuilt
+     * in the comparison pass; that is twice the bigram work and no extra queries, and the
+     * row set was already fully materialised before this change.
      *
      * @param int $subid The submission record being compared.
      * @param int $cmid The course module the submission belongs to.
@@ -522,16 +577,44 @@ class analyser {
             return [];
         }
 
-        // V1.0.80: bigram SETS, computed once for this document and once per other
-        // document, compared with jaccard_sets(). Identical scores to the previous
-        // bigrams()/jaccard() pair — see the harness in the release notes — without
-        // flipping and merging arrays on every comparison.
-        $bga    = question_parser::bigram_set($normtext);
         $others  = $DB->get_records_select(
             'plagiarism_docguard_sub',
             'cmid = :cmid AND id != :subid AND status = :status AND normtext IS NOT NULL',
             ['cmid' => $cmid, 'subid' => $subid, 'status' => 'analysed']
         );
+
+        /*
+         * Too few submissions to tell a template apart from a copy. With two documents,
+         * text in both is either the assessment tool's or one student's theft of the
+         * other's, and nothing in the data distinguishes them - a third document does.
+         * Reporting a number here would mean reporting one that is wrong, not one that is
+         * approximate: two independent answers on a normal cover sheet measure 50.5%.
+         */
+        $cohortsize = count($others) + 1;
+        if ($cohortsize < self::COHORT_MIN_FOR_COMPARISON) {
+            return [];
+        }
+
+        // Pass 1: what this activity's assessment tool supplied to every student.
+        $cohorttexts = [$normtext];
+        foreach ($others as $other) {
+            $cohorttexts[] = (string)$other->normtext;
+        }
+        $template = self::template_bigrams_for_cohort($cohorttexts);
+        unset($cohorttexts);
+
+        $bga = array_diff_key(question_parser::bigram_set($normtext), $template);
+
+        /*
+         * Nothing of this student's own left once the template is removed. The submission is
+         * the template and little else - an empty form, or a student who answered by
+         * restating the question. That is a matter for the assessor, not a copy match, and
+         * comparing two such submissions would score them against each other on the few
+         * stray bigrams that survived.
+         */
+        if (empty($bga)) {
+            return [];
+        }
 
         // V1.0.85 PERF-FIX-DG-SIMILARITY-N1: the user record was fetched inside the loop,
         // one query per match. On an activity with a shared source document - a class
@@ -541,7 +624,13 @@ class analyser {
         // matches first, then fetch every user in one query.
         $matches = [];
         foreach ($others as $other) {
-            $bgb  = question_parser::bigram_set((string)$other->normtext);
+            $bgb = array_diff_key(
+                question_parser::bigram_set((string)$other->normtext),
+                $template
+            );
+            if (empty($bgb)) {
+                continue;
+            }
             $score = question_parser::jaccard_sets($bga, $bgb);
             if ($score >= self::S12_REPORT_THRESHOLD) {
                 $matches[] = [$other, $score];
@@ -586,6 +675,43 @@ class analyser {
 
 
     /* ── Helpers ─────────────────────────────────────────────────────────────── */
+
+    /**
+     * Read provenance from the submitted file, without letting it break the analysis.
+     *
+     * V1.2.0. The file has to be written to local disk for the readers to open it, which is
+     * the same thing the extractor does. Everything here is wrapped: provenance is the
+     * weakest of the authenticity checks and the most dependent on the environment (ZipArchive
+     * for .docx, pdfinfo for PDFs), so a failure to read it must leave the submission analysed
+     * with no provenance rather than failing the submission.
+     *
+     * @param \stored_file $file The submitted file.
+     * @param int $wordcount Words extracted, so editing time can be put in proportion.
+     * @return array ['available' => bool, 'fields' => array, 'findings' => array]
+     */
+    protected static function file_provenance(\stored_file $file, int $wordcount): array {
+        $empty = ['available' => false, 'fields' => [], 'findings' => []];
+        $tmpfile = null;
+
+        try {
+            $basename = clean_filename($file->get_filename());
+            if (strlen($basename) > 120) {
+                $basename = substr($basename, -120);
+            }
+            // uniqid for the same reason the extractor uses it: two workers on one file.
+            $tmpfile = make_temp_directory('docguard') . '/' . uniqid('dgprov_', true) . '_' . $basename;
+            $file->copy_content_to($tmpfile);
+
+            return authenticity::provenance($tmpfile, $file->get_filename(), $wordcount);
+        } catch (\Throwable $e) {
+            debugging('DocGuard: provenance read failed: ' . $e->getMessage(), DEBUG_DEVELOPER);
+            return $empty;
+        } finally {
+            if ($tmpfile !== null) {
+                @unlink($tmpfile);
+            }
+        }
+    }
 
     /**
      * The user columns fullname() requires, as a field list for $DB.
@@ -722,10 +848,171 @@ class analyser {
      * Version stamp for the meaning of a stored score.
      *
      * 1 = style-signal sum (every release up to 1.0.98). 2 = copy similarity percentage.
-     * Rows carrying no stamp were written under model 1 and are not comparable with model
-     * 2 rows, so the reports label them rather than silently reinterpreting them.
+     * 3 = copy similarity percentage with the activity's shared template text subtracted.
+     *
+     * Rows carrying no stamp were written under model 1. Model 2 and model 3 are both
+     * similarity percentages but they are NOT comparable: on an activity built from an
+     * assessment template, a model 2 score is mostly the template. The reports label rows
+     * from an older model rather than silently reinterpreting them.
      */
-    const SCORE_MODEL = 2;
+    const SCORE_MODEL = 3;
+
+    /**
+     * Fewest submissions an activity needs before any pair can be compared.
+     *
+     * V1.1.5. Below this, text shared by two submissions is indistinguishable from text
+     * copied by one of them, because there is no third document to establish that the
+     * wording came from the assessment tool. Measured: two independent answers carrying a
+     * normal RTO cover sheet and student declaration score 50.5% - MEDIUM, reported to a
+     * trainer as a match - and 7.1% as soon as a third submission identifies the template.
+     *
+     * The number is not merely uncertain at n < 3, it is wrong, so nothing is reported.
+     * Every new submission re-runs the comparison for the activity, so an activity corrects
+     * itself as soon as the third student submits.
+     */
+    const COHORT_MIN_FOR_COMPARISON = 3;
+
+    /**
+     * Fraction of an activity's submissions that makes shared wording "template".
+     *
+     * A bigram carried by at least ceil(n / TEMPLATE_SHARE_DIVISOR) of the submissions to
+     * one activity - never fewer than COHORT_MIN_FOR_COMPARISON - is text the assessment
+     * tool supplied, not evidence about any student, and is subtracted before comparing.
+     *
+     * A third of the cohort, not a fixed count. A fixed count of three was the first thing
+     * tried and it is actively dangerous: in a cohort of 30 with three students copying one
+     * another, their shared text appears in three submissions, so the rule subtracts
+     * precisely the evidence of the collusion. Measured, fixed-3 found 1 of 3 ring pairs at
+     * n=30, 0 of 15 for a ring of six, and failed in 6 of the 10 scenarios tested. A third
+     * of the cohort held in 9 of 10: a ring of 3 at n=30 gave 3 of 3 pairs, a ring of 6 gave
+     * 15 of 15, a ring of 5 at n=48 gave 10 of 10, with zero false matches across more than
+     * 3,000 innocent pairs.
+     *
+     * The honest limit is the tenth scenario: collusion involving a third or more of the
+     * cohort suppresses part of its own evidence (a ring of 10 at n=30 showed 20 of its 45
+     * pairs, not all 45). It is not hidden, and no common-text method can do better - at
+     * that scale the shared wording genuinely is the norm for the activity. report.php
+     * states the cohort size and the threshold used, so the figure can be interrogated
+     * rather than taken on trust.
+     */
+    const TEMPLATE_SHARE_DIVISOR = 3;
+
+    /**
+     * @var int Most submissions used to derive an activity's template.
+     *
+     * Bounds the memory one comparison can take. See template_sample() for the measurements:
+     * deriving the template from all 100 submissions of a large activity peaked at 172 MB,
+     * which exhausts a 256 MB cron, while a sample of 12 produced a bit-for-bit identical
+     * template. 60 leaves a wide margin above where the estimate is reliable.
+     */
+    const TEMPLATE_SAMPLE_MAX = 60;
+
+    /**
+     * How many submissions must carry a bigram before it counts as template text.
+     *
+     * @param int $cohortsize Number of analysed submissions to the activity, this one included.
+     * @return int Document-frequency threshold at or above which a bigram is subtracted.
+     */
+    public static function template_threshold(int $cohortsize): int {
+        return max(
+            self::COHORT_MIN_FOR_COMPARISON,
+            (int)ceil($cohortsize / self::TEMPLATE_SHARE_DIVISOR)
+        );
+    }
+
+    /**
+     * Which bigrams in an activity are template text, and so excluded from comparison.
+     *
+     * Pure function, so the rule is testable without a database. The caller streams the
+     * document frequencies in - see cross_student_similarity(), which accumulates them one
+     * document at a time rather than holding every submission's bigram set in memory.
+     *
+     * @param array $docfreq Map of bigram => number of submissions to the activity carrying it.
+     * @param int $cohortsize Number of analysed submissions to the activity.
+     * @return array Map of bigram => true for every bigram excluded from comparison.
+     */
+    public static function template_bigrams(array $docfreq, int $cohortsize): array {
+        $min = self::template_threshold($cohortsize);
+
+        return array_fill_keys(
+            array_keys(array_filter($docfreq, static fn($count) => $count >= $min)),
+            true
+        );
+    }
+
+    /**
+     * The template bigrams of an activity, given the normalised text of every submission.
+     *
+     * The one implementation of "what does this activity's assessment tool supply", used by
+     * cross_student_similarity() when a submission is analysed and by report.php when the
+     * class report is drawn. It is a single function on purpose: report.php carried its own
+     * copy of the pairwise comparison, so when the subtraction was added to the analyser the
+     * class report still showed every innocent pair. Two transcriptions of one rule drifting
+     * apart is also what produced FIX-DG-FULLNAME-MISSING-NAME-FIELDS in 1.1.4.
+     *
+     * Each bigram set is built, counted and discarded in turn, so peak memory is one set
+     * plus the activity's vocabulary rather than every submission's set at once.
+     *
+     * @param array $normtexts Normalised text of every analysed submission to the activity.
+     * @return array Map of bigram => true for every bigram excluded from comparison.
+     */
+    public static function template_bigrams_for_cohort(array $normtexts): array {
+        $normtexts = array_values($normtexts);
+        $sample    = self::template_sample($normtexts);
+
+        $docfreq = [];
+        foreach ($sample as $normtext) {
+            foreach (question_parser::bigram_set((string)$normtext) as $bigram => $ignored) {
+                $docfreq[$bigram] = ($docfreq[$bigram] ?? 0) + 1;
+            }
+        }
+
+        return self::template_bigrams($docfreq, count($sample));
+    }
+
+    /**
+     * The submissions used to work out what an activity's assessment template is.
+     *
+     * V1.2.0 FIX-DG-TEMPLATE-MEMORY. Deriving the template from every submission in a large
+     * activity exhausts the memory a Moodle cron is given. Measured on a cohort of 100
+     * submissions each at the 65,000-character normtext cap, with high-entropy text so almost
+     * every word pair is unique: a peak of 172 MB inside one call, and 180 MB at 200
+     * submissions. Moodle's cron commonly runs with a 256 MB limit and has its own baseline on
+     * top, so a large activity would hit "Allowed memory size exhausted" - which leaves the
+     * submission at 'pending' and retries it on every cron run, forever.
+     *
+     * The cost is the document-frequency map, which holds the whole activity's vocabulary at
+     * once. It is not needed: the template is the text carried by a THIRD OR MORE of the
+     * submissions, which is a proportion, and a proportion is exactly what a sample estimates.
+     * Measured on the same 200-submission cohort, the template derived from a sample of 12 was
+     * bit-for-bit identical to the one derived from all 200 - unsurprising, since assessment
+     * boilerplate appears in essentially every submission. 60 is used because it leaves ample
+     * headroom above the point where the estimate is reliable while bounding memory: the
+     * 60-document pass measured 445 ms and no appreciable allocation.
+     *
+     * Sampled by STRIDE, not by taking the first N, and never randomly:
+     *  - taking the first N biases towards the oldest submissions, which would miss a template
+     *    that changed partway through a cohort (a corrected assessment tool reissued mid-term);
+     *  - random sampling would give the same submission a different score on re-analysis, and
+     *    a score a trainer cannot reproduce is not evidence.
+     *
+     * @param array $normtexts Normalised text of every analysed submission, zero-indexed.
+     * @return array The subset used to derive the template.
+     */
+    private static function template_sample(array $normtexts): array {
+        $count = count($normtexts);
+        if ($count <= self::TEMPLATE_SAMPLE_MAX) {
+            return $normtexts;
+        }
+
+        $stride = (int)floor($count / self::TEMPLATE_SAMPLE_MAX);
+        $sample = [];
+        for ($i = 0; $i < $count && count($sample) < self::TEMPLATE_SAMPLE_MAX; $i += $stride) {
+            $sample[] = $normtexts[$i];
+        }
+
+        return $sample;
+    }
 
     /**
      * Map a 0-100 risk score onto its risk band.

@@ -330,6 +330,203 @@ final class privacy_provider_test extends \core_privacy\tests\provider_testcase 
     }
 
     /**
+     * Source-level guard: the export must carry the authenticity findings.
+     *
+     * The behavioural test below is authoritative but needs a real Moodle, so it is skipped in
+     * a bare PHP environment - which is exactly where a mutation that removed the authenticity
+     * block from the export went undetected. This runs anywhere.
+     *
+     * Also asserts that the privacy metadata string for analysisjson describes what the column
+     * now holds. That string IS the site's record of processing, printed at
+     * /admin/tool/dataprivacy and shown to a data subject who asks what is held about them.
+     * Before 1.2.0 it said "how many sections were found, how much text was extracted, and
+     * which scoring model" while the column had begun holding verbatim passages of the
+     * student's writing and names read out of their file.
+     *
+     * @return void
+     */
+    public function test_the_export_and_the_registry_both_cover_the_authenticity_findings(): void {
+        $src = file_get_contents(__DIR__ . '/../classes/privacy/provider.php');
+        $code = implode("\n", array_filter(
+            explode("\n", $src),
+            fn($l) => !preg_match('~^\s*(\*|//|/\*)~', $l)
+        ));
+
+        // Single-quoted: in a double-quoted string "\\$authenticity" interpolates an undefined
+        // variable and silently leaves a broken pattern behind.
+        $this->assertMatchesRegularExpression(
+            '/\'authenticity\'\s*=>\s*\$authenticity/',
+            $code,
+            'export_user_data() must include the authenticity findings. They are declared in '
+            . 'the privacy registry and they are the evidence a student would contest.'
+        );
+        foreach (['evidence', 'questions', 'provenance'] as $part) {
+            $this->assertStringContainsString($part, $code,
+                'The export must reach the ' . $part . ' held in analysisjson.');
+        }
+
+        /*
+         * Read from the language file rather than through get_string().
+         *
+         * This assertion is about the text that is published in the site's privacy registry,
+         * so the language file is the source of truth, and reading it directly means the check
+         * also runs in a bare PHP environment where no string manager exists.
+         */
+        $lang = file_get_contents(__DIR__ . '/../lang/en/plagiarism_docguard.php');
+        $this->assertSame(
+            1,
+            preg_match(
+                '/privacy:metadata:docguard_sub:analysisjson\'\]\s*=\s*(.*?);\s*\n/s',
+                $lang,
+                $matches
+            ),
+            'The privacy registry entry for analysisjson must exist.'
+        );
+        $declared = $matches[1];
+        foreach (['authenticity', 'verbatim', 'verification question'] as $needed) {
+            $this->assertStringContainsStringIgnoringCase($needed, $declared,
+                'The privacy registry entry for analysisjson must describe the authenticity '
+                . 'findings, the verbatim quoting of the student\'s writing, and the '
+                . 'verification questions. Under-declaring here is a statement to a regulator '
+                . 'that is not true.');
+        }
+    }
+
+    /**
+     * The authenticity findings must be exported to the student they are about.
+     *
+     * V1.2.0. These live inside analysisjson, which get_metadata() has declared since 1.0.95
+     * while this export omitted it. That was already a gap; 1.2.0 made it a material one,
+     * because the column now holds the authenticity findings - each quoting a passage of the
+     * student's own writing verbatim as its evidence - the verification questions, which embed
+     * a whole sentence of theirs, and names read out of the submitted file's metadata.
+     *
+     * That is precisely the material a student contesting a misconduct referral needs, and
+     * withholding it while the site's own privacy registry states that DocGuard holds it is the
+     * failure this API exists to prevent. Mutation testing found the gap: removing the
+     * authenticity block from the export failed no test at all.
+     *
+     * @return void
+     */
+    public function test_export_user_data_includes_the_authenticity_findings(): void {
+        $this->resetAfterTest();
+        $this->enable_docguard();
+
+        $act     = $this->create_docguard_assign();
+        $student = $this->getDataGenerator()->create_user();
+
+        $analysis = [
+            'section_count' => 1,
+            'score_model'   => \plagiarism_docguard\analyser::SCORE_MODEL,
+            'authenticity'  => [
+                'checks_version' => \plagiarism_docguard\authenticity::CHECKS_VERSION,
+                'findings' => [
+                    [
+                        'check'    => 'assistant_artefact',
+                        'label'    => 'assistant framing',
+                        'severity' => 'strong',
+                        'matched'  => 'Certainly!',
+                        'offset'   => 12,
+                        'evidence' => '…My answer Certainly! Here is a response…',
+                    ],
+                    [
+                        'check'    => 'provenance',
+                        'label'    => 'document records a single save',
+                        'severity' => 'context',
+                        'matched'  => 'revision 1',
+                        'offset'   => null,
+                        'evidence' => null,
+                    ],
+                ],
+                'tally'      => ['strong' => 1, 'notable' => 0, 'context' => 1],
+                'provenance' => [
+                    'available' => true,
+                    'fields'    => ['creator' => 'A Student', 'editing_minutes' => '3'],
+                ],
+                'questions'  => [
+                    ['question' => 'You wrote: "I checked the cool room." Talk me through it.',
+                     'basis' => 'sentence taken from the submission'],
+                ],
+            ],
+        ];
+
+        $this->create_sub([
+            'userid'       => $student->id,
+            'cmid'         => $act['cm']->id,
+            'contextid'    => $act['context']->id,
+            'filename'     => 'my-assessment.docx',
+            'normtext'     => 'full normalised document text belonging to the student',
+            'analysisjson' => json_encode($analysis),
+            'timecreated'  => 1700000000,
+        ]);
+
+        $this->export_context_data_for_user($student->id, $act['context'], 'plagiarism_docguard');
+
+        $data = writer::with_context($act['context'])
+            ->get_data([get_string('pluginname', 'plagiarism_docguard')]);
+        $exported = $data->submissions[0];
+
+        $this->assertArrayHasKey('authenticity', $exported,
+            'The authenticity findings must be exported: they are declared in the privacy '
+            . 'registry, and they are what a student contesting a referral needs to see.');
+        $auth = $exported['authenticity'];
+        $this->assertNotNull($auth);
+
+        $this->assertCount(2, $auth['findings']);
+        $this->assertContains('assistant framing', array_column($auth['findings'], 'what'));
+
+        // The quoted passage of the student's own writing is the evidence against them, which
+        // makes it the single most important thing in this export.
+        $this->assertContains('…My answer Certainly! Here is a response…',
+            array_column($auth['findings'], 'your_text'),
+            'The evidence quoted from the student\'s writing must be disclosed to them.');
+
+        $this->assertSame('A Student', $auth['document_metadata']['creator']);
+        $this->assertSame('3', $auth['document_metadata']['editing_minutes']);
+        $this->assertContains(
+            'You wrote: "I checked the cool room." Talk me through it.',
+            $auth['verification_questions']
+        );
+        $this->assertSame(
+            \plagiarism_docguard\authenticity::CHECKS_VERSION,
+            $auth['checks_version'],
+            'The export must say which check set produced the findings.'
+        );
+    }
+
+    /**
+     * A row analysed before 1.2.0 exports cleanly, with no authenticity block.
+     *
+     * @return void
+     */
+    public function test_export_handles_rows_with_no_authenticity_block(): void {
+        $this->resetAfterTest();
+        $this->enable_docguard();
+
+        $act     = $this->create_docguard_assign();
+        $student = $this->getDataGenerator()->create_user();
+
+        $this->create_sub([
+            'userid'       => $student->id,
+            'cmid'         => $act['cm']->id,
+            'contextid'    => $act['context']->id,
+            'filename'     => 'older.docx',
+            'normtext'     => 'text analysed before the authenticity checks existed',
+            'analysisjson' => json_encode(['section_count' => 1, 'score_model' => 2]),
+        ]);
+
+        $this->export_context_data_for_user($student->id, $act['context'], 'plagiarism_docguard');
+
+        $data = writer::with_context($act['context'])
+            ->get_data([get_string('pluginname', 'plagiarism_docguard')]);
+
+        $this->assertArrayHasKey('authenticity', $data->submissions[0]);
+        $this->assertNull($data->submissions[0]['authenticity'],
+            'A row with no findings must export null, not an empty structure that would read '
+            . 'as "checked, nothing found".');
+    }
+
+    /**
      * export_user_data() exports each approved context separately and skips a context
      * in which the student has nothing.
      *

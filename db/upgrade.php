@@ -983,5 +983,188 @@ function xmldb_plagiarism_docguard_upgrade($oldversion) {
         upgrade_plugin_savepoint(true, 2026101700, 'plagiarism', 'docguard');
     }
 
+    if ($oldversion < 2026101800) {
+        /*
+         * V1.1.5 FIX-DG-SHARED-TEMPLATE-INFLATES-EVERY-PAIR. No schema change; this step
+         * retracts scores that are wrong.
+         *
+         * THE DEFECT. Similarity was measured over everything the extractor pulled out of
+         * the submitted file. On a real RTO submission that includes the assessment tool's
+         * own text - the cover sheet, the RTO code, the instructions to the student, the
+         * academic misconduct declaration, the question itself - and every student in the
+         * activity submits that text because the template told them to. It was never
+         * evidence about anybody.
+         *
+         * Measured on a ten-student cohort carrying one ordinary 185-word cover sheet and
+         * declaration: all 44 innocent pairs scored above the reporting threshold, the worst
+         * at 57.9%, and two students answering DIFFERENT UNITS reached 48.0% on the strength
+         * of the cover sheet alone. A trainer opening the class report would have been handed
+         * the entire cohort as copy matches. Two independent answers alone measured 50.5%.
+         *
+         * Earlier testing missed it because every fixture was bare answer text, which is not
+         * what an RTO submits. The live site did not show it either: its rows predate the
+         * similarity score entirely and were written by the old style-signal model.
+         *
+         * THE FIX, in analyser::cross_student_similarity(). Text carried by at least a third
+         * of the activity's submissions (never fewer than three) is the template, and is
+         * subtracted before any pair is compared. On the same cohort the real copy pair holds
+         * at 90.9%, the worst innocent pair falls to 9.2%, and the false matches go from 44
+         * to none. A third of the cohort rather than a fixed count of three, because a fixed
+         * three subtracts the shared text of any three students who copied one another -
+         * precisely the evidence - and measured worse in 6 of the 10 scenarios tested.
+         *
+         * WHY THIS STEP RETRACTS RATHER THAN RELABELS. Every score written by model 2 is a
+         * number that is mostly template on any templated activity. The reports already
+         * label a superseded model, but a stale MEDIUM or HIGH badge beside an innocent
+         * student's name is not made harmless by a label: the badge is the thing a trainer
+         * acts on. So model 2 scores are cleared and their rows returned to the queue for
+         * re-analysis under model 3, which is the only way to get a number that means what
+         * it says.
+         *
+         * Rows whose file has already been pruned by the retention setting cannot be
+         * re-analysed. They are cleared too and stay at zero: no score is honest, and a score
+         * known to be inflated is not.
+         *
+         * Model 1 rows (style signals, every release to 1.0.98) were retracted by the 1.0.99
+         * step and are untouched here.
+         */
+        $sub = 'plagiarism_docguard_sub';
+        if ($dbman->table_exists($sub)) {
+            // The stamp is written by json_encode(), so the needle is the encoder's spacing.
+            $ismodel2 = $DB->sql_like('analysisjson', ':model2', false);
+            $params   = ['status' => 'analysed', 'model2' => '%"score_model":2%'];
+            $affected = $DB->count_records_select(
+                $sub,
+                "status = :status AND analysisjson IS NOT NULL AND $ismodel2",
+                $params
+            );
+
+            if ($affected > 0) {
+                /*
+                 * Back to 'pending', so the existing scan task re-analyses the submission
+                 * the next time it runs, and the badge zeroed in the same statement so no
+                 * inflated number is displayed in the window before that happens.
+                 */
+                $DB->execute(
+                    "UPDATE {" . $sub . "}
+                        SET status = :pending, overall_riskscore = 0, overall_risklevel = :low
+                      WHERE status = :status AND analysisjson IS NOT NULL AND $ismodel2",
+                    $params + ['pending' => 'pending', 'low' => 'low']
+                );
+                mtrace("DocGuard 1.1.5: retracted $affected similarity score(s) that counted "
+                    . 'shared assessment-template text as copying, and queued those '
+                    . 'submissions for re-analysis. Any whose file has already been pruned by '
+                    . 'the retention setting will stay unscored.');
+            }
+        }
+
+        upgrade_plugin_savepoint(true, 2026101800, 'plagiarism', 'docguard');
+    }
+
+    if ($oldversion < 2026101900) {
+        /*
+         * V1.2.0: authenticity checks. No schema change.
+         *
+         * WHAT THIS RELEASE ADDS, and why it is shaped the way it is.
+         *
+         * The owner's requirement was to analyse the submitted Word document or PDF against
+         * known ChatGPT and Gemini signals. Three measurements decided how:
+         *
+         *  1. The marker-word signals this plugin shipped to 1.0.98 flagged 0 of 48 answers
+         *     generated by ChatGPT, Gemini and Claude, and found zero markers in 48 of 48.
+         *     The highest scorer in that test was a human ESL student, at 27.
+         *  2. Style statistics as absolute measures do not separate the classes: across eight
+         *     measures, the overlap between human and AI ranges ran 25% to 100%, and the one
+         *     that looked usable rested on a human baseline of eight documents.
+         *  3. Comparing windows within a single document - the approach needing no baseline,
+         *     and the most promising on paper - fails at assessment-answer length. Splitting
+         *     59 documents in half and comparing each author with themselves: one author's own
+         *     variation reached 36% on mean sentence length at p90, where the MEDIAN difference
+         *     between two different authors was 20%. Same for word length (17% vs 16%),
+         *     vocabulary diversity (14% vs 8%) and long-word rate (90% vs 61%).
+         *
+         * So nothing here measures how the writing reads. The checks are:
+         *
+         *  - conversational artefacts from a chat assistant, and prompt remnants;
+         *  - markdown syntax inside a word-processed document;
+         *  - citations to Acts and Regulations that are not recognised, or that name a real Act
+         *    with a year it never had;
+         *  - what the file records about how it was made (editing minutes, revision count,
+         *    created/modified span, PDF producer).
+         *
+         * Measured on the corpora: 0 findings across 25 human and human-imitation documents,
+         * including second-language writing. 0 findings on the 48 machine-generated answers,
+         * which were stored as clean answer text - and 13 markdown spans plus 10 prompt
+         * delimiters in the raw ChatGPT output as it actually came out of the interface. The
+         * honest claim is therefore that these checks find evidence of PASTING, not evidence of
+         * AI authorship, and a learner who pastes only the answer body leaves none of it. That
+         * limit is printed in the report panel, not only in documentation.
+         *
+         * THERE IS NO SCORE. Findings are stored and displayed individually, each with its
+         * severity and its evidence quoted. A weighted total would require calibration against
+         * real student submissions, which this plugin has never had, and inventing weights is
+         * exactly how the pre-1.0.99 badge came to be a confident number derived entirely from
+         * signals that discriminated nothing. overall_riskscore remains the copy-similarity
+         * percentage and nothing else.
+         *
+         * WHY NO BACKFILL. Findings are produced during analysis, from the submitted file,
+         * because provenance needs the file itself and the text checks need the raw extraction
+         * rather than the normalised text that is stored. Rows analysed under earlier releases
+         * therefore have no authenticity section, and the report simply omits the panel for
+         * them - it does not show an empty one, which would read as "checked, nothing found".
+         * Re-analysing a submission produces the findings, and the 1.1.5 step has already
+         * queued every model-2 row for re-analysis.
+         */
+        upgrade_plugin_savepoint(true, 2026101900, 'plagiarism', 'docguard');
+    }
+
+    if ($oldversion < 2026102000) {
+        /*
+         * V1.2.1: fixes from the pre-release audit of 1.2.0. No schema change, no data change.
+         *
+         * Five defects, all found by attacking 1.2.0 rather than by running its tests, which
+         * passed throughout:
+         *
+         * 1. EVIDENCE QUOTED THE WRONG PASSAGE. preg_match() with PREG_OFFSET_CAPTURE returns
+         *    BYTE offsets; evidence() cut the window with core_text::substr(), which counts
+         *    CHARACTERS. The excerpt drifted by one position per multi-byte character earlier in
+         *    the document. Measured: at 140 bytes of drift the evidence came out EMPTY, and
+         *    beyond that it quoted an unrelated part of the submission. 140 bytes is about 45
+         *    accented letters - a learner called Zoë describing a café fridge reaches it inside
+         *    one paragraph. The panel's whole claim is that its evidence can be checked.
+         *
+         * 2. A CRAFTED FILE COULD DESTROY ITS OWN ANALYSIS. Provenance values were stored at
+         *    whatever length the file declared. A .docx carrying a 500 KB dc:creator was stored
+         *    verbatim, and analysisjson is a TEXT column - 65,535 bytes on MySQL - so the row
+         *    write would fail and that submission's analysis would be lost. Values are now
+         *    capped at 256 characters and control characters are stripped.
+         *
+         * 3. THE PRIVACY REGISTRY UNDER-DECLARED. 1.2.0 began storing verbatim passages of the
+         *    student's writing, a whole sentence of theirs inside each verification question, and
+         *    names read out of the submitted file - while the registry entry for analysisjson
+         *    still described "how many sections were found". That entry IS the site's record of
+         *    processing under Article 30 and what a data subject is shown. Rewritten.
+         *
+         * 4. THE EXPORT WITHHELD THE FINDINGS. export_user_data() did not return the
+         *    authenticity block, so the one person most entitled to it - a student contesting a
+         *    referral - could not obtain the evidence quoted against them, even though the
+         *    registry said it was held. Now exported in readable form.
+         *
+         * 5. LARGE ACTIVITIES EXHAUSTED CRON MEMORY. Deriving the activity template from every
+         *    submission peaked at 172 MB on a cohort of 100 documents at the normtext storage
+         *    cap, against a cron commonly limited to 256 MB; failure there leaves the submission
+         *    at 'pending' and retries it forever. The template is a proportion, so it is now
+         *    derived from a bounded, strided, deterministic sample of at most 60 submissions -
+         *    measured as producing a bit-for-bit identical template. The class report caps its
+         *    pairwise table and says so rather than exhausting memory with no explanation.
+         *
+         * Also hardened: loadXML() on student-supplied word/document.xml now passes
+         * LIBXML_NONET, and the absence of LIBXML_NOENT (which is what prevents XXE file
+         * disclosure and entity-expansion denial of service) is asserted by a test rather than
+         * relied on as a libxml default.
+         */
+        upgrade_plugin_savepoint(true, 2026102000, 'plagiarism', 'docguard');
+    }
+
     return true;
 }
