@@ -116,7 +116,7 @@ licence.** This is a commercial plugin: installing the code is not sufficient.
 To unlock a site you need an account at [lms-labs.com](https://lms-labs.com) with a
 sufficient credit balance, then:
 
-*lms-labs.com → Dashboard → Plugins → DocGuard → Unlock (5,000 credits)*
+*lms-labs.com → Dashboard → Plugins → DocGuard → Unlock (50 credits, US$5)*
 
 **The plugin contacts lms-labs.com to verify this.** On installation and periodically
 thereafter, DocGuard makes outbound HTTPS calls to `lms-labs.com` to check the site's
@@ -193,16 +193,20 @@ another submission to the same activity. The bands sit where the measurements pu
 
 | Band | Similarity | Measured example |
 |---|---|---|
-| LOW | 0–34% | Two students answering the same closed procedural question independently: **13%** |
-| MEDIUM | 35–64% | Worth reading both submissions |
-| HIGH | 65–100% | A genuine copy with light paraphrasing: **92%** |
+| LOW | 0–34% | Students answering the same question independently, template excluded: **0–1%** |
+| MEDIUM | 35–64% | A copy with about ten words changed: **48%** |
+| HIGH | 65–100% | A near-verbatim copy: **93%** |
 
-An unrelated control pair measured **0.7%**.
+Every figure here comes from the sample pack shipped with the release, so you can reproduce
+them: `php docguard-measure-sample-pack.php /path/to/plagiarism/docguard .`
+
+Earlier releases of this README quoted 13%, 92% and 47.5%. Those were measured before 1.1.5
+excluded the shared assessment template and no longer reproduce.
 
 Quotations of 20 words or more and the reference list are removed before comparison. Two
 students who quote the same legislation or textbook passage share wording that neither of
 them wrote: measured on two unrelated answers carrying one shared quotation, similarity was
-**47.5% with the quotation left in — above the reporting threshold, a false copy match —
+**44.8% with the quotation left in — above the reporting threshold, a false copy match —
 and 0.0% with it removed.**
 
 ### The assessment template is excluded (1.1.5)
