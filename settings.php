@@ -116,18 +116,117 @@ $dgtools = \plagiarism_docguard\extractor::extraction_tools();
 echo $OUTPUT->header();
 echo $OUTPUT->heading(get_string('pluginname', 'plagiarism_docguard'));
 
-$dgtiercolour = ['best' => ['#065f46', '#ecfdf5', '#a7f3d0'],
-                 'workable' => ['#92400e', '#fffbeb', '#fde68a'],
-                 'lowest' => ['#991b1b', '#fef2f2', '#fecaca']][$dgtools['quality']];
-echo '<div style="background:' . $dgtiercolour[1] . ';border:1px solid ' . $dgtiercolour[2]
-    . ';border-left:4px solid ' . $dgtiercolour[0] . ';border-radius:6px;padding:0.85rem 1.1rem;'
-    . 'margin:0 0 1.25rem;font-size:0.88rem;color:' . $dgtiercolour[0] . ';line-height:1.6;">'
-    . '<strong>' . s(get_string('pdfextractiontier', 'plagiarism_docguard', (object)[
-        'tier'    => $dgtools['tier'],
-        'quality' => $dgtools['quality'],
-    ])) . '</strong>'
-    . ($dgtools['advice'] !== '' ? '<br>' . s($dgtools['advice']) : '')
-    . '</div>';
+/*
+ * V1.2.5. The "Document reading" panel.
+ *
+ * This replaces a one-line coloured banner that named the extraction tier and, whenever
+ * poppler-utils was absent, told the administrator to install it. That advice is now
+ * wrong - see extractor::extraction_tools() - and the banner never answered the question
+ * an administrator actually has, which is "what can this thing read, and is there
+ * anything I need to do about it?"
+ *
+ * So the panel answers exactly that, in this order: which reader is in use, whether
+ * anything needs doing, whether scanned work can be read, the exact command if they want
+ * it, and a table of every file type a student might submit with a plain yes or no. The
+ * install commands are spelled out because "install Tesseract OCR" is not something an
+ * administrator can act on without going to look it up, and the ones who most need this
+ * panel are the ones least likely to.
+ *
+ * Green only when there is genuinely nothing to do. The OCR row is blue, not amber: a site
+ * that never receives scans is not misconfigured, and colouring a deliberate choice as a
+ * warning is how an admin panel loses credibility.
+ */
+$dgreaderstring = [
+    'pdftotext'   => 'docreadingreader_pdftotext',
+    'ghostscript' => 'docreadingreader_ghostscript',
+    'builtin'     => 'docreadingreader_builtin',
+][$dgtools['tier']] ?? 'docreadingreader_builtin';
+
+echo html_writer::start_div('', ['style' =>
+    'border:1px solid #d1d5db;border-radius:8px;margin:0 0 1.5rem;overflow:hidden;'
+    . 'font-size:0.88rem;line-height:1.6;']);
+
+echo html_writer::div(
+    s(get_string('docreadingheading', 'plagiarism_docguard')),
+    '',
+    ['style' => 'background:#f3f4f6;padding:0.6rem 1.1rem;font-weight:700;color:#111827;'
+        . 'border-bottom:1px solid #d1d5db;']
+);
+
+// Row 1: the reader in use. Green, because there is nothing to do about it.
+echo html_writer::div(
+    get_string($dgreaderstring, 'plagiarism_docguard')
+        . '<br>' . s(get_string('docreadingreaderok', 'plagiarism_docguard')),
+    '',
+    ['style' => 'background:#ecfdf5;border-left:4px solid #065f46;color:#065f46;'
+        . 'padding:0.85rem 1.1rem;']
+);
+
+// Row 2: OCR, on or off, with the exact command when off.
+if ($dgtools['tesseract']) {
+    echo html_writer::div(
+        get_string('docreadingocron', 'plagiarism_docguard'),
+        '',
+        ['style' => 'background:#ecfdf5;border-left:4px solid #065f46;color:#065f46;'
+            . 'padding:0.85rem 1.1rem;border-top:1px solid #d1d5db;']
+    );
+} else {
+    $dgcmd = 'display:block;background:#0f172a;color:#e5e7eb;padding:0.5rem 0.75rem;'
+           . 'border-radius:4px;margin:0.3rem 0 0.7rem;font-family:monospace;font-size:0.85rem;';
+    echo html_writer::div(
+        get_string('docreadingocroff', 'plagiarism_docguard')
+        . '<p style="margin:0.7rem 0 0.3rem;">'
+        . s(get_string('docreadingocrinstall', 'plagiarism_docguard')) . '</p>'
+        . '<strong style="font-size:0.8rem;">'
+        . s(get_string('docreadingocrdebian', 'plagiarism_docguard')) . '</strong>'
+        . '<code style="' . $dgcmd . '">sudo apt-get install tesseract-ocr</code>'
+        . '<strong style="font-size:0.8rem;">'
+        . s(get_string('docreadingocrrhel', 'plagiarism_docguard')) . '</strong>'
+        . '<code style="' . $dgcmd . '">sudo yum install tesseract</code>'
+        . '<p style="margin:0;">' . s(get_string('docreadingocrsize', 'plagiarism_docguard')) . '</p>'
+        . (!$dgtools['ghostscript']
+            ? '<p style="margin:0.5rem 0 0;">'
+                . s(get_string('docreadingocrnogs', 'plagiarism_docguard')) . '</p>'
+            : ''),
+        '',
+        ['style' => 'background:#eff6ff;border-left:4px solid #1d4ed8;color:#1e3a8a;'
+            . 'padding:0.85rem 1.1rem;border-top:1px solid #d1d5db;']
+    );
+}
+
+// Row 3: every file type a student might submit, and whether this server reads it.
+$dgocr  = (bool)$dgtools['tesseract'];
+$dgyes  = '<span style="color:#065f46;font-weight:600;">'
+        . s(get_string('docreadingyes', 'plagiarism_docguard')) . '</span>';
+$dgno   = '<span style="color:#991b1b;font-weight:600;">'
+        . s(get_string('docreadingno', 'plagiarism_docguard')) . '</span>';
+$dgneed = '<span style="color:#92400e;font-weight:600;">'
+        . s(get_string('docreadingneedsocr', 'plagiarism_docguard')) . '</span>';
+$dgrep  = '<span style="color:#1e3a8a;font-weight:600;">'
+        . s(get_string('docreadingreported', 'plagiarism_docguard')) . '</span>';
+
+$dgrows = [
+    ['docreadingrowpdf',       $dgyes],
+    ['docreadingrowdocx',      $dgyes],
+    ['docreadingrowscanpdf',   $dgocr ? $dgyes : $dgneed],
+    ['docreadingrowimage',     $dgocr ? $dgyes : $dgneed],
+    ['docreadingrowprotected', $dgrep],
+    ['docreadingrowdoc',       $dgrep],
+];
+$dgtable = '<div style="padding:0.85rem 1.1rem;border-top:1px solid #d1d5db;">'
+    . '<strong style="display:block;margin-bottom:0.5rem;color:#111827;">'
+    . s(get_string('docreadingwhatitreads', 'plagiarism_docguard')) . '</strong>'
+    . '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">';
+foreach ($dgrows as [$dgkey, $dgverdict]) {
+    $dgtable .= '<tr><td style="padding:0.3rem 0;border-bottom:1px solid #f3f4f6;color:#374151;">'
+        . s(get_string($dgkey, 'plagiarism_docguard'))
+        . '</td><td style="padding:0.3rem 0;border-bottom:1px solid #f3f4f6;text-align:right;'
+        . 'white-space:nowrap;">' . $dgverdict . '</td></tr>';
+}
+$dgtable .= '</table></div>';
+echo $dgtable;
+
+echo html_writer::end_div();
 
 // Status panel - CACHED config only. No vendor API call on a render path.
 $notices = [];

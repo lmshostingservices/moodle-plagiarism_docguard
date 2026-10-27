@@ -938,4 +938,121 @@ final class authenticity_test extends \advanced_testcase {
         $this->assertIsInt(authenticity::CHECKS_VERSION);
         $this->assertGreaterThanOrEqual(1, authenticity::CHECKS_VERSION);
     }
+
+    /**
+     * A block of pasted markdown, exactly as a chat window produces it.
+     *
+     * @return string Five lines, one per line-anchored markdown kind plus bold.
+     */
+    private static function pasted_markdown_block(): string {
+        return "## Personal Hygiene Practices\n"
+            . "**1. Handwashing.** Food handlers must wash their hands thoroughly.\n"
+            . "* Potentially hazardous food must be kept at or below 5 degrees\n"
+            . "> Note: this is a critical control point\n"
+            . "---\n";
+    }
+
+    /**
+     * The same block with every line indented by the given amount.
+     *
+     * @param string $pad The indentation to put in front of each line.
+     * @return string The indented block.
+     */
+    private static function indented(string $pad): string {
+        $out = '';
+        foreach (explode("\n", self::pasted_markdown_block()) as $line) {
+            $out .= ($line === '' ? '' : $pad . $line) . "\n";
+        }
+        return $out;
+    }
+
+    /**
+     * Indentation levels the extractors actually produce.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function markdown_indent_provider(): array {
+        return [
+            'flush left'                      => [''],
+            'one space'                       => [' '],
+            'three spaces, the old limit'     => ['   '],
+            'four spaces, one past the limit' => ['    '],
+            'seven spaces, Ghostscript'       => ['       '],
+            'twelve spaces, a nested cell'    => ['            '],
+            'one tab'                         => ["\t"],
+            'two tabs'                        => ["\t\t"],
+        ];
+    }
+
+    /**
+     * V1.2.5 FIX-DG-MARKDOWN-INDENT: every markdown kind is found at any indentation.
+     *
+     * The four line-anchored patterns were written `^\s{0,3}`, which is CommonMark's rule
+     * for what counts as markdown INSIDE A MARKDOWN FILE. It is the wrong rule for text
+     * extracted out of a PDF, and it left half of these checks unreachable on a large
+     * share of real submissions:
+     *
+     *  - Ghostscript's txtwrite device - the extraction path on any host without
+     *    poppler-utils - prefixes EVERY line with seven spaces. On those hosts the
+     *    heading, bullet, blockquote and horizontal-rule checks had never once fired, on
+     *    any document, since they were written. Measured on a pasted ChatGPT answer:
+     *    pdftotext produced 10 findings of which 3 were notable; Ghostscript produced 8,
+     *    of which 1 was notable. The two missing kinds were plainly present in the text,
+     *    just indented past the limit.
+     *  - `pdftotext -layout` PRESERVES the document's indentation, so the same four checks
+     *    also missed any pasted block inside a table cell or under a hanging indent -
+     *    which, in VET assessment templates, is most of them.
+     *
+     * This is V1.0.86 FIX-DG-INDENTED-MARKERS again. It was found on a live site and fixed
+     * in question_parser; these patterns were written later, in V1.2.0, and the fix was
+     * never carried across.
+     *
+     * The assertion is on the exact set of kinds, not on a count being non-zero: with the
+     * old patterns the bold span still matched at every indentation, so a "found
+     * something" assertion passes against the defect.
+     *
+     * @dataProvider markdown_indent_provider
+     * @param string $pad The indentation in front of every line.
+     * @return void
+     */
+    public function test_markdown_is_found_at_any_indentation(string $pad): void {
+        $findings = authenticity::markdown_contamination(self::indented($pad));
+
+        $labels = array_column($findings, 'label');
+        sort($labels);
+
+        $this->assertSame(
+            [
+                'markdown blockquote',
+                'markdown bold',
+                'markdown bullet',
+                'markdown heading',
+                'markdown horizontal rule',
+            ],
+            $labels,
+            'Indentation must not decide which markdown checks run.'
+        );
+    }
+
+    /**
+     * The anchor still holds: markdown markers mid-line are not findings.
+     *
+     * Widening the tolerated whitespace must not become "find it anywhere". The marker
+     * starting its own line is the structural signal that separates pasted markdown from
+     * a sentence containing an asterisk or a hash, and `[ \t]*` rather than `\s*` is what
+     * keeps a pattern from beginning on one line and finishing on another under /m.
+     *
+     * @return void
+     */
+    public function test_markdown_markers_mid_line_are_not_findings(): void {
+        $text = "The recipe said to use 2 # of flour and I weighed it.\n"
+            . "The temperature is > 5 degrees in the danger zone every time.\n"
+            . "I rated the hazard 3 * 2 which is a score of six on the matrix.\n";
+
+        $labels = array_column(authenticity::markdown_contamination($text), 'label');
+
+        $this->assertStringNotContainsString('heading', implode(' ', $labels));
+        $this->assertStringNotContainsString('blockquote', implode(' ', $labels));
+        $this->assertStringNotContainsString('bullet', implode(' ', $labels));
+    }
 }

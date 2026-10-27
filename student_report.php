@@ -572,6 +572,29 @@ if (is_array($dgauth)) {
             'notable' => (int)($dgtally['notable'] ?? 0),
             'context' => (int)($dgtally['context'] ?? 0),
         ])) . '</div>';
+
+    /*
+     * V1.2.5. When the text came from OCR, say so here, at the top of the panel that
+     * quotes the student's words back at a trainer.
+     *
+     * Everything below this point attributes sentences to the student: the evidence beside
+     * each finding, and the verification questions a trainer is meant to ask out loud. OCR
+     * does not reproduce those sentences exactly - measured on a scanned submission,
+     * "SIT30821" came back as "S1T30821" and every "I" as "|". Reading an OCR artefact
+     * aloud as the student's own wording, in a conversation about their conduct, would be
+     * putting words in their mouth.
+     *
+     * Shown only when the stored row says so. A submission analysed before this release
+     * carries no stamp, and an absent stamp means the method is unknown rather than that
+     * it was not OCR, so nothing is claimed either way.
+     */
+    if (!empty($dganalysis['extraction_is_ocr'])) {
+        echo '<div style="margin-top:0.6rem;background:#eff6ff;border:1px solid #bfdbfe;'
+            . 'border-left:3px solid #1d4ed8;border-radius:4px;padding:0.5rem 0.75rem;'
+            . 'font-size:0.8rem;color:#1e3a8a;line-height:1.5;">'
+            . s(get_string('authocrnotice', 'plagiarism_docguard'))
+            . '</div>';
+    }
     echo '</div>';
 
     echo '<div style="padding:1.1rem 1.25rem;">';

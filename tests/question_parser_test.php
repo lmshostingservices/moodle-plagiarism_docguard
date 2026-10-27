@@ -746,4 +746,217 @@ final class question_parser_test extends \advanced_testcase {
                     . 'the risk, which is how likely somebody is to actually slip on it.'],
         ];
     }
+
+    /**
+     * Three realistic answers, long enough to survive MIN_SECTION_CHARS.
+     *
+     * @return string[] Answer text for questions 1, 2 and 3.
+     */
+    private static function three_answers(): array {
+        return [
+            'I wash my hands with warm water and soap for at least twenty seconds and dry '
+                . 'them on paper towel rather than my apron, every time before I handle food.',
+            'Standard 3.2.2 of the Food Standards Code requires potentially hazardous food '
+                . 'to be kept at five degrees or below, and I check the log on the fridge door.',
+            'The Act gives me a duty to take reasonable care for my own health and safety '
+                . 'and for other people in the workplace, so I put the wet floor sign out first.',
+        ];
+    }
+
+    /**
+     * V1.2.5 FIX-DG-PAGEBREAK-MARKERS: a question at the top of a page still opens a
+     * section.
+     *
+     * pdftotext emits a form feed at every page boundary and attaches it to the first line
+     * of the next page, so a question that happened to start a page arrived as
+     * "\x0cQuestion 3:" and the marker pattern - which tolerated only spaces and tabs -
+     * did not match it.
+     *
+     * The damage was not limited to that one question. try_labelled() needs two or more
+     * sections before parse() will use its result, so on a document whose page breaks
+     * stranded enough markers the WHOLE submission collapsed to a single "Full Document"
+     * section and per-question analysis was silently off. Multi-page submissions are the
+     * normal case.
+     *
+     * @return void
+     */
+    public function test_a_question_after_a_page_break_still_opens_a_section(): void {
+        [$a1, $a2] = self::three_answers();
+
+        $sections = question_parser::parse(
+            "Question 1: Hygiene\n$a1\n\n\x0cQuestion 2: Temperature\n$a2\n"
+        );
+
+        $this->assertCount(2, $sections);
+        $this->assertSame(['Question 1', 'Question 2'], array_column($sections, 'label'));
+        $this->assertStringContainsString('warm water and soap', $sections[0]['text']);
+        $this->assertStringContainsString('Standard 3.2.2', $sections[1]['text']);
+    }
+
+    /**
+     * The label must survive a page break too, not just the split.
+     *
+     * The label is read by a second pattern, and a mismatch between the two does not drop
+     * the section - it MISLABELS it. That is V1.0.86 in another guise: a page-break
+     * "Question 3" reported to the trainer as "Section 3".
+     *
+     * @return void
+     */
+    public function test_a_question_after_a_page_break_keeps_its_own_label(): void {
+        [$a1, $a2, $a3] = self::three_answers();
+
+        $sections = question_parser::parse(
+            "Question 1: Hygiene\n$a1\n\n\x0cQuestion 2: Temperature\n$a2\n\n"
+            . "\x0c   Question 3: WHS\n$a3\n"
+        );
+
+        $this->assertSame(
+            ['Question 1', 'Question 2', 'Question 3'],
+            array_column($sections, 'label')
+        );
+        $this->assertSame([1, 2, 3], array_column($sections, 'num'));
+    }
+
+    /**
+     * V1.2.5 FIX-DG-CITED-SECTION-NUMBER: a cited Act section at the start of a wrapped
+     * line must not open a section, and must not sever the answer it belongs to.
+     *
+     * The ^ anchor was never enough on its own, because line wrapping turns mid-sentence
+     * text into start-of-line text:
+     *
+     *     "The duty on workers is set out in
+     *      Section 28 of the Act, which is the part that applies to me."
+     *
+     * "Section 28" starts its own line, so it opened a section - and because a section runs
+     * until the next marker, it also took the rest of the real answer with it. Measured on
+     * a three-question submission: Question 3 dropped from 213 bytes to 49, the other 77%
+     * being attributed to a phantom "Section 28", and its per-question similarity was then
+     * computed on a quarter of what the student wrote.
+     *
+     * Citing a section of an Act is routine in the WHS and food-safety units this plugin
+     * serves, which is why this was not a rare shape.
+     *
+     * The assertion is on the TEXT as well as the count. A test that only counted sections
+     * would pass against a fix that dropped the phantom section and left the answer
+     * truncated.
+     *
+     * @dataProvider cited_reference_provider
+     * @param string $citation The wrapped citation line.
+     * @return void
+     */
+    public function test_a_cited_reference_does_not_open_a_section(string $citation): void {
+        [$a1, $a2, $a3] = self::three_answers();
+        $tail = "The requirement is set out in\n" . $citation;
+
+        $sections = question_parser::parse(
+            "Question 1: Hygiene\n$a1\n\nQuestion 2: Temperature\n$a2\n\n"
+            . "Question 3: WHS\n$a3 $tail\n"
+        );
+
+        $this->assertCount(3, $sections);
+        $this->assertSame(
+            ['Question 1', 'Question 2', 'Question 3'],
+            array_column($sections, 'label')
+        );
+        $this->assertStringContainsString(
+            $citation,
+            $sections[2]['text'],
+            'The citation belongs to the answer that contains it, not to a section of its own.'
+        );
+        $this->assertStringContainsString(
+            'reasonable care',
+            $sections[2]['text'],
+            'The answer must still be whole: the phantom section used to take the rest of it.'
+        );
+    }
+
+    /**
+     * The citations that used to open a phantom section.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function cited_reference_provider(): array {
+        return [
+            'a section of an Act'  => ['Section 28 of the Act, which applies to workers.'],
+            'a part of a Code'     => ['Part 2 of the Food Standards Code, on temperature.'],
+            'a numbered task'      => ['Task 1 is complete and the photographs are attached.'],
+            'a numbered answer'    => ['Answer 2 is attached as a separate document.'],
+            'a question reference' => ['Question 1 of 3 was answered above in full already.'],
+        ];
+    }
+
+    /**
+     * A real heading with no colon is still a heading.
+     *
+     * The guard above rejects a marker followed by a lowercase word. It must not reject a
+     * marker followed by a capitalised one, which is an ordinary way to write a heading -
+     * "Question 2 Explain how the Act applies". Getting this wrong would be worse than the
+     * defect it fixes, because it would silently turn per-question analysis off for a whole
+     * assessment template.
+     *
+     * @return void
+     */
+    public function test_a_heading_without_a_colon_still_opens_a_section(): void {
+        [$a1, $a2] = self::three_answers();
+
+        $sections = question_parser::parse(
+            "Question 1 Describe your hygiene practices\n$a1\n\n"
+            . "Question 2 Explain the temperature rule\n$a2\n"
+        );
+
+        $this->assertCount(2, $sections);
+        $this->assertSame(['Question 1', 'Question 2'], array_column($sections, 'label'));
+    }
+
+    /**
+     * V1.2.5 FIX-DG-PARSE-ALL-SHORT: a document whose every labelled section is too short
+     * falls back to one Full Document section, not to nothing.
+     *
+     * Both branches of parse() used to return filter_short() directly, and filter_short()
+     * drops sections under MIN_SECTION_CHARS. So a document with two or more markers whose
+     * sections were all short returned an EMPTY ARRAY for a document that plainly had text.
+     *
+     * The caller treats that as a failure and gives up on the submission:
+     * analyser::analyse_file() returns status "error" AND normtext => null. The null is the
+     * part that matters - a submission with no stored normtext is invisible to
+     * cross-student comparison, neither compared against the cohort nor available for the
+     * cohort to be compared against, and contributes nothing to deriving the assessment
+     * template either.
+     *
+     * The trigger is ordinary: a student who uploads the question sheet with the answers
+     * still blank, or a cover sheet and marking grid on their own. Both are everyday
+     * wrong-file submissions. The same text with NO markers was handled correctly as one
+     * Full Document section, so having structure made DocGuard do LESS with the file.
+     *
+     * @dataProvider all_short_provider
+     * @param string $text The document text.
+     * @return void
+     */
+    public function test_a_document_of_only_short_sections_falls_back_to_full_document(
+        string $text
+    ): void {
+        $sections = question_parser::parse($text);
+
+        $this->assertCount(
+            1,
+            $sections,
+            'parse() must never return nothing for a document that has text in it.'
+        );
+        $this->assertSame('Full Document', $sections[0]['label']);
+        $this->assertNotEmpty($sections[0]['text']);
+    }
+
+    /**
+     * Documents with markers but no answer long enough to keep.
+     *
+     * @return array<string, array{0: string}>
+     */
+    public static function all_short_provider(): array {
+        return [
+            'question sheet with the answers left blank' => [
+                "Question 1: Hygiene\n\n\nQuestion 2: Temperature\n\n\nQuestion 3: WHS\n\n\n"],
+            'a marking grid on its own' => [
+                "Question 1 ...... /5\nQuestion 2 ...... /5\nQuestion 3 ...... /5\nTotal ...... /15\n"],
+        ];
+    }
 }

@@ -1222,6 +1222,100 @@ final class signal_validity_test extends \advanced_testcase {
     }
 
     /**
+     * The test suite must not call Moodle functions deprecated on the versions it supports.
+     *
+     * V1.2.4, found by running the suite on Moodle 5.3. Two functions the tests used -
+     * course_delete_module() and set_coursemodule_groupmode() - were deprecated in 5.2, and on
+     * 5.3 they emit a deprecation that Moodle's PHPUnit integration reports as an unexpected
+     * debugging() call: four notices in an otherwise clean run.
+     *
+     * The replacement, \core_courseformat\local\cmactions, does not exist before 5.2, and this
+     * plugin supports Moodle 4.4 upwards. So neither call works everywhere and the tests go
+     * through docguard_delete_module() and docguard_set_groupmode(), which pick at runtime.
+     *
+     * This guard exists because the obvious tidy-up - deleting the old branch now that 5.3 is
+     * the version in front of you - silently breaks the suite on the 4.4 floor, where it cannot
+     * be noticed without installing 4.4.
+     *
+     * @return void
+     */
+    public function test_tests_do_not_call_functions_deprecated_on_supported_moodles(): void {
+        $deprecated = [
+            'course_delete_module' => 'docguard_delete_module()',
+            'set_coursemodule_groupmode' => 'docguard_set_groupmode()',
+        ];
+
+        foreach (glob(__DIR__ . '/*_test.php') as $file) {
+            $code = implode("\n", array_filter(
+                explode("\n", file_get_contents($file)),
+                fn($l) => !preg_match('~^\s*(\*|//|/\*)~', $l)
+            ));
+            foreach ($deprecated as $fn => $replacement) {
+                $this->assertSame(0, preg_match_all('/(?<![\w>$])' . $fn . '\s*\(/', $code),
+                    basename($file) . ' calls ' . $fn . '(), deprecated in Moodle 5.2. Use the '
+                    . 'compatibility helper ' . $replacement . ' instead: the direct replacement '
+                    . 'does not exist on this plugin\'s Moodle 4.4 floor.');
+            }
+        }
+
+        // And the helpers must keep both branches, not just the modern one.
+        $helper = file_get_contents(__DIR__ . '/fixtures/docguard_test_helper.php');
+        foreach (['docguard_delete_module', 'docguard_set_groupmode'] as $fn) {
+            $this->assertStringContainsString($fn, $helper, "$fn() must exist");
+        }
+        $this->assertStringContainsString('cmactions', $helper,
+            'The helpers must use the 5.2+ API when it is available.');
+        $this->assertSame(2, preg_match_all('/class_exists\(/', $helper),
+            'Each helper must pick its API at runtime. Removing the class_exists() check '
+            . 'breaks the suite on Moodle 4.4 and 4.5, where cmactions does not exist.');
+    }
+
+    /**
+     * PHPUnit metadata stays in doc-comments while Moodle 4.4 is supported.
+     *
+     * Running on Moodle 5.3 reports 29 PHPUnit deprecations: doc-comment metadata (@covers,
+     * @dataProvider) will not be supported in PHPUnit 12. The fix is PHP attributes - and
+     * attributes need PHPUnit 10 or later. Moodle 4.4 and 4.5 ship PHPUnit 9.6, which does not
+     * read them, so converting now would silently stop the data providers running on the two
+     * oldest supported versions.
+     *
+     * Deprecation notices on the newest Moodle are the correct trade for tests that actually
+     * execute on the oldest. This test records the decision so it is revisited deliberately,
+     * when the supported floor passes Moodle 5.0.
+     *
+     * @return void
+     */
+    public function test_phpunit_metadata_style_matches_the_supported_floor(): void {
+        $plugin = new \stdClass();
+        include(__DIR__ . '/../version.php');
+        $this->assertSame(404, $plugin->supported[0],
+            'If the floor has risen above Moodle 4.4, revisit this: from Moodle 5.0 (PHPUnit 11) '
+            . 'the doc-comment metadata in these tests should become PHP attributes.');
+
+        /*
+         * While the floor is 4.4, attributes must NOT be used - PHPUnit 9.6 ignores them.
+         *
+         * The needles are assembled at runtime rather than written out, because a guard that
+         * contains the string it searches for finds itself and fails on a clean tree. That has
+         * happened five times in this plugin's history; this is the sixth and it was caught
+         * before release only because the suite was run.
+         */
+        $attributes = array_map(
+            fn($name) => '#' . '[' . $name,
+            ['DataProvider', 'CoversClass', 'CoversMethod', 'CoversFunction']
+        );
+        foreach (glob(__DIR__ . '/*_test.php') as $file) {
+            $src = file_get_contents($file);
+            foreach ($attributes as $attr) {
+                $this->assertStringNotContainsString($attr, $src,
+                    basename($file) . ' uses the ' . substr($attr, 2) . ' attribute, which '
+                    . 'PHPUnit 9.6 on Moodle 4.4 does not read. The data provider would '
+                    . 'silently not run there.');
+            }
+        }
+    }
+
+    /**
      * The class report must compare the same way the analyser does.
      *
      * report.php does not call cross_student_similarity(). It carries its own pairwise loop,

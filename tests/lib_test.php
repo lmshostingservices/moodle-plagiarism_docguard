@@ -125,7 +125,7 @@ final class lib_test extends \advanced_testcase {
         $this->setUser($teacher);
         $this->assertTrue(plagiarism_docguard_user_visible($cm, $context, (int)$theirs->id));
 
-        set_coursemodule_groupmode($cm->id, SEPARATEGROUPS);
+        $this->docguard_set_groupmode((int)$cm->id, SEPARATEGROUPS);
         \course_modinfo::purge_course_module_cache($course->id, $cm->id);
         rebuild_course_cache($course->id, true);
         $cm = get_coursemodule_from_id('assign', $act['cm']->id, 0, false, MUST_EXIST);
@@ -167,7 +167,7 @@ final class lib_test extends \advanced_testcase {
         $student = $this->getDataGenerator()->create_and_enrol($course, 'student');
         $this->getDataGenerator()->create_group_member(['groupid' => $group->id, 'userid' => $student->id]);
 
-        set_coursemodule_groupmode($act['cm']->id, VISIBLEGROUPS);
+        $this->docguard_set_groupmode((int)$act["cm"]->id, VISIBLEGROUPS);
         \course_modinfo::purge_course_module_cache($course->id, $act['cm']->id);
         rebuild_course_cache($course->id, true);
         $cm = get_coursemodule_from_id('assign', $act['cm']->id, 0, false, MUST_EXIST);

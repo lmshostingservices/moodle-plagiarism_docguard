@@ -64,7 +64,6 @@ defined('MOODLE_INTERNAL') || die();
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class authenticity {
-
     /**
      * @var int Version of the check set that produced a stored finding.
      *
@@ -222,17 +221,46 @@ class authenticity {
      * Bare hyphen bullets are excluded entirely. Plenty of people type "- " to make a list
      * and it would fire on a large share of honest submissions.
      *
+     * V1.2.5 FIX-DG-MARKDOWN-INDENT: the four line-anchored patterns below were written
+     * `^\s{0,3}`, tolerating at most THREE characters of leading whitespace. That is
+     * CommonMark's rule for what counts as markdown inside a markdown file. It is the
+     * wrong rule for text extracted out of a PDF, and it left four of these eight checks
+     * unreachable on a large share of real submissions:
+     *
+     *  - Ghostscript's txtwrite device - extraction path 2, which runs on any host without
+     *    poppler-utils - prefixes EVERY line with SEVEN spaces. On those hosts the
+     *    heading, bullet, blockquote and horizontal-rule checks had never once fired, on
+     *    any document, since they were written. Measured on a pasted ChatGPT answer
+     *    containing a `##` heading, `**bold**` and `*` bullets: pdftotext produced 10
+     *    findings, 3 of them notable; Ghostscript produced 8, 1 notable. The two that went
+     *    missing were plainly present in the extracted text, just indented past the limit.
+     *  - `pdftotext -layout` deliberately PRESERVES the source document's indentation, so
+     *    the same four checks also missed any pasted block sitting in a table cell or
+     *    under a hanging indent - which, in the VET assessment templates this plugin
+     *    serves, is most of them.
+     *
+     * This is the same defect as V1.0.86 FIX-DG-INDENTED-MARKERS in question_parser,
+     * which was found on a live site and fixed there. These patterns were written later,
+     * in V1.2.0, and the fix was never carried across.
+     *
+     * `[ \t]*` rather than `\s*`: `\s` matches newlines, and under /m a pattern that can
+     * consume newlines after `^` may begin matching on one line and finish on another -
+     * which is how an anchored check quietly becomes an unanchored one. Only leading
+     * horizontal whitespace is tolerated, so the marker must still START ITS OWN LINE.
+     * That is the structural signal separating pasted markdown from a sentence that
+     * happens to contain an asterisk.
+     *
      * @param string $text Text as extracted from the submitted file.
      * @return array List of findings.
      */
     public static function markdown_contamination(string $text): array {
         $patterns = [
-            '/^\s{0,3}#{2,6}\s+\S/m'            => 'markdown heading',
+            '/^[ \t]*#{2,6}[ \t]+\S/m'          => 'markdown heading',
             '/\*\*[^*\n]{2,80}\*\*/'            => 'markdown bold',
             '/(?<![\w*])\*[^*\n]{2,60}\*(?![\w*])/' => 'markdown italic',
-            '/^\s{0,3}>\s+\S/m'                 => 'markdown blockquote',
-            '/^\s{0,3}(?:\*|\+)\s+\S/m'         => 'markdown bullet',
-            '/^\s{0,3}(?:---|___|\*\*\*)\s*$/m' => 'markdown horizontal rule',
+            '/^[ \t]*>[ \t]+\S/m'               => 'markdown blockquote',
+            '/^[ \t]*(?:\*|\+)[ \t]+\S/m'       => 'markdown bullet',
+            '/^[ \t]*(?:---|___|\*\*\*)[ \t]*$/m' => 'markdown horizontal rule',
             '/`{1,3}[^`\n]+`{1,3}/'             => 'markdown code span',
             '/\[[^\]\n]{1,80}\]\((?:https?:\/\/|www\.)[^)\s]+\)/' => 'markdown link',
         ];

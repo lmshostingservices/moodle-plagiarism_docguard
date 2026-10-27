@@ -239,7 +239,7 @@ final class task_cleanup_test extends \advanced_testcase {
         // still holds the student's answer text.
         $strayid = $this->create_sec(0, ['userid' => $student->id, 'cmid' => $act['cm']->id]);
 
-        course_delete_module((int)$act['cm']->id);
+        $this->docguard_delete_module((int)$act["cm"]->id, $act["course"] ?? null);
         $this->assertFalse($DB->record_exists('course_modules', ['id' => $act['cm']->id]));
 
         $output = $this->run_task();

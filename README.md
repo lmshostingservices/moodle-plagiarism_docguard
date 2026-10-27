@@ -58,23 +58,54 @@ student**. They were removed in 1.0.99 and nothing has replaced them. See
   any other plagiarism plugin installed on the site.
 - A paid DocGuard licence — see **Licensing** below.
 - For DOCX extraction: PHP's `ZipArchive` extension.
-- For PDF extraction: `pdftotext` (poppler-utils) or Ghostscript is strongly recommended.
-  DocGuard falls back to a pure-PHP PDF parser when neither is available, but the
-  external tools produce better text on complex documents.
+- For PDF extraction: **nothing.** DocGuard has its own PDF reader and needs no external
+  tool to read a text PDF. See below.
+- For reading **scanned** PDFs and photographs of pages: Tesseract OCR, which is optional.
+
+### What DocGuard needs installed
+
+**For text PDFs and Word documents: nothing.** Until 1.2.5 this section recommended
+installing poppler-utils, and the settings page said so too. That recommendation was
+withdrawn after it was measured. DocGuard 1.2.5 fixed seven defects in its own PDF reader,
+and on an 18-document corpus — LibreOffice, Word-style object streams, ReportLab filter
+chains, browser-printed per-glyph output, nested resource dictionaries — the built-in
+reader now produces text identical to `pdftotext` on 17 of 18, the eighteenth being a
+password-protected file it reports as such.
+
+Asking an administrator to raise a hosting ticket for no measurable difference is not
+advice worth giving, so DocGuard no longer gives it.
+
+**For scanned work: Tesseract.** A scanned PDF or a photograph of a page contains no text,
+and recognising characters in an image cannot be done in PHP at usable speed or accuracy.
+This is the one capability DocGuard cannot provide itself, so it is optional and the plugin
+is wholly usable without it — a scan is reported as a scan rather than as an error.
+
+```
+apt-get install tesseract-ocr     # Debian / Ubuntu
+yum install tesseract             # RHEL / CentOS / cPanel
+```
+
+About 20 MB, runs locally, and no submission is sent anywhere. Most scanned PDFs need
+nothing further: DocGuard extracts the embedded page image out of the PDF itself, so a
+phone-app or "scan to PDF" submission needs Tesseract alone. Black-and-white scans from
+office copiers are encoded differently and also use Ghostscript to rasterise the page.
 
 ### External binaries DocGuard shells out to
 
-DocGuard invokes two command-line tools when they are present on the server's `PATH`.
-Administrators on locked-down or shared hosting should know this before installing.
+DocGuard invokes these command-line tools when they are present on the server's `PATH`,
+and works without any of them. Administrators on locked-down or shared hosting should know
+this before installing.
 
 | Binary | Package | Used for | How it is invoked |
 |--------|---------|----------|-------------------|
-| `pdftotext` | poppler-utils | First-choice PDF text extraction | `timeout 60 pdftotext -layout -enc UTF-8 <file> -` |
-| `gs` | Ghostscript | Fallback PDF extraction when `pdftotext` is absent or returns unreadable text | `timeout 60 gs -dSAFER -dNOPAUSE -dBATCH -dQUIET -sDEVICE=txtwrite -dNoOutputFonts …` |
+| `pdftotext` | poppler-utils | PDF text extraction, first choice when present | `timeout 60 pdftotext -layout -enc UTF-8 <file> -` |
+| `gs` | Ghostscript | PDF text extraction when `pdftotext` is absent; rasterising bitonal scans for OCR | `timeout 60 gs -dSAFER -dNOPAUSE -dBATCH -dQUIET -sDEVICE=txtwrite -dNoOutputFonts …` |
+| `tesseract` | tesseract-ocr | Reading scanned PDFs and image submissions | `timeout 120 tesseract <file> <out> --psm 1 -l eng` |
 
-Both are optional — DocGuard degrades to its pure-PHP PDF parser if neither exists — and
-neither is ever passed anything but a path to the submitted file. Every variable part of
-both command lines goes through `escapeshellarg()`, and the binary names are literals.
+All three are optional. DocGuard reads text PDFs with its own reader when the first two are
+absent, and reports scanned work rather than guessing at it when the third is. None is ever
+passed anything but a path to the submitted file: every variable part of every command line
+goes through `escapeshellarg()`, and the binary names are literals.
 
 `-dSAFER` is passed to Ghostscript explicitly and must not be removed. Every PDF reaching
 the extractor is a file a student uploaded, and without `-dSAFER` Ghostscript honours
@@ -186,7 +217,7 @@ Two separate things, reported separately and never combined into one number.
 |---|---|---|
 | Cross-submission similarity | Jaccard similarity over word bigrams, after quotations, the reference list and the activity's shared assessment template are removed | **This is the product** |
 | Authenticity findings | Checks on the submitted file that are true or false: chat-assistant artefacts, markdown in a word-processed document, unverifiable legislation citations, and what the file records about how it was made | Added in 1.2.0 |
-| Text extraction | PDF (pdftotext / Ghostscript) and DOCX, with a readability check and a non-Latin-script guard | Supporting |
+| Text extraction | PDF (DocGuard's own reader, or pdftotext / Ghostscript when present), DOCX, and scanned PDFs and images by OCR when Tesseract is installed, with a readability check and a non-Latin-script guard | Supporting |
 
 **Score = similarity percentage.** A submission scored 78 shares 78% of its word pairs with
 another submission to the same activity. The bands sit where the measurements put them:

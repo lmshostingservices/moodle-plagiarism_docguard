@@ -208,7 +208,52 @@ $string['copycheckfound']           = 'Matching text found with {$a} other submi
 $string['norecords']                = 'No DocGuard analysis records found for this activity. Submissions are analysed automatically when students submit files.';
 $string['nosectionbreakdown']       = 'No per-section breakdown is stored for this submission. The overall score above was calculated, but the section detail was either never stored or has since been removed. Use the Re-analyse button at the top of this page to rebuild it.';
 $string['legacyscorebulk']          = '<strong>{$a} submission(s) on this page were scored under the previous model.</strong> Until DocGuard 1.0.98 the score was a sum of writing-style signals. Those signals were tested against 48 documents written by three current language models and did not detect any of them, so the numbers they produced are not evidence of anything, and they are not comparable with the similarity percentages shown beside them. Use the Re-analyse link on a submission to rescore it against the current model. The copying table above is unaffected: it is computed fresh from the stored text on every page load, for every analysed submission, whichever model scored it.';
-$string['pdfextractiontier']        = 'PDF text extraction on this server: {$a->tier} ({$a->quality} quality).';
+/*
+ * V1.2.5. The old string here was 'PDF text extraction on this server: {$a->tier}
+ * ({$a->quality} quality).' and it was shown with advice to install poppler-utils
+ * whenever pdftotext was missing.
+ *
+ * Both were replaced because the measurement they rested on is no longer true. Six
+ * defects in the built-in reader were fixed in 1.2.5, and it now extracts the same text
+ * as pdftotext on 17 of 18 test documents. Describing that as "lowest quality" and asking
+ * an administrator to raise a hosting ticket for no measurable gain is noise, and noise in
+ * an admin panel teaches people to stop reading it.
+ *
+ * What replaces it says which reader is in use, what it can and cannot read, and the one
+ * thing worth installing if the site wants scanned work read - with the exact command,
+ * because "install Tesseract" is not an instruction anyone can act on without looking it
+ * up.
+ */
+$string['docreadingheading']        = 'Document reading';
+$string['docreadingreader_pdftotext'] = 'PDFs and Word documents are read with <strong>pdftotext</strong> (poppler-utils).';
+$string['docreadingreader_ghostscript'] = 'PDFs and Word documents are read with <strong>Ghostscript</strong>.';
+$string['docreadingreader_builtin'] = 'PDFs and Word documents are read with <strong>DocGuard\'s built-in reader</strong>. No external tools are needed, and none are missing.';
+$string['docreadingreaderok']       = 'Nothing to do. All three readers extract the same text on DocGuard\'s test corpus — 17 of 18 documents identical, the 18th a password-protected file that is reported as such.';
+$string['docreadingocron']          = '<strong>Scanned work can be read.</strong> Tesseract OCR is installed, so scanned PDFs and photographs of pages are read as well as ordinary files. Text recognised this way is labelled as OCR in the report, because OCR does not reproduce a student\'s wording exactly.';
+$string['docreadingocroff']         = '<strong>Scanned work cannot be read.</strong> A scanned PDF or a photograph of a page has no text in it, so DocGuard reports it and asks the trainer for the original file. Text PDFs and Word documents are unaffected.';
+$string['docreadingocrinstall']     = 'To read scanned work, install Tesseract OCR on this server:';
+$string['docreadingocrdebian']      = 'Debian / Ubuntu';
+$string['docreadingocrrhel']        = 'RHEL / CentOS / cPanel';
+$string['docreadingocrsize']        = 'About 20 MB. It runs locally — no submission is sent anywhere. Nothing else is required: DocGuard reads the page image out of most scanned PDFs itself, and uses Ghostscript only for black-and-white copier scans.';
+$string['docreadingocrnogs']        = 'Note: Ghostscript is not installed on this server either. With Tesseract alone DocGuard reads scans from phone apps and most "scan to PDF" tools. Black-and-white scans from office copiers also need Ghostscript.';
+$string['docreadingwhatitreads']    = 'What DocGuard reads';
+$string['docreadingrowpdf']         = 'PDF with text (Word, Google Docs, LibreOffice, "Save as PDF")';
+$string['docreadingrowdocx']        = 'Word document (.docx)';
+$string['docreadingrowscanpdf']     = 'Scanned PDF (phone app, "scan to PDF")';
+$string['docreadingrowimage']       = 'Photograph of a page (.jpg, .png, .heic)';
+$string['docreadingrowprotected']   = 'Password-protected PDF';
+$string['docreadingrowdoc']         = 'Legacy .doc (Word 97-2003)';
+$string['docreadingyes']            = 'Yes';
+$string['docreadingno']             = 'No';
+$string['docreadingneedsocr']       = 'Needs Tesseract';
+$string['docreadingreported']       = 'Reported, not read';
+/*
+ * V1.2.5. Shown at the top of the authenticity panel when the submission's text came from
+ * OCR rather than from the file. Everything in that panel quotes the student's own
+ * sentences back at a trainer, and OCR does not reproduce them exactly.
+ */
+$string['authocrnotice']           = 'This submission is a scan, and its text was read by optical character recognition. The quoted text below is what the recognition produced, not the student\'s exact characters: OCR commonly misreads codes and single letters, for example "SIT30821" as "S1T30821". Treat the wording as approximate when asking the student about it, and ask for the original file if the exact wording matters.';
+$string['docreadingocrlabel']       = 'Read by OCR — wording is approximate';
 $string['legacyscore']              = 'Scored under the previous model. This submission was analysed by DocGuard 1.0.98 or earlier, when the score was a sum of writing-style signals. Those signals were tested against 48 documents written by three current language models and did not detect any of them, so the number below is not evidence of anything and is not comparable with scores produced since. Use Re-analyse to rescore this submission against the current model.';
 $string['copyevidenceheading']      = 'Copying between submissions';
 $string['copyevidencenone']         = 'No other submission to this activity shares significant wording with this one. This is the only check DocGuard performs that compares the submission against anything, and it covers this activity only — not the web, published sources, essay banks, other courses or previous cohorts.';

@@ -1,5 +1,205 @@
 # Changelog
 
+## 1.2.5 - 2026-10-27
+
+**DocGuard reads PDFs properly on its own, and can read scanned work.** Version
+`2026102700`. No schema change, no data change, no re-analysis triggered.
+
+### Why this release exists
+
+A customer asked whether they needed to install poppler-utils, because their server has
+Ghostscript and DocGuard's settings page was telling them to install it anyway.
+
+Answering that properly meant running all three extraction tiers over the same documents.
+The comparison found that the advice was pointing at the wrong thing entirely, and that
+DocGuard's own built-in PDF reader was not merely lower quality - it was returning
+**scrambled text, and the plugin was accepting it**. "Student name" came out as
+"Asemnts tCon"; the unit code "SITXFSA005" as "AITXFAA005".
+
+Measured on the same ten documents, before and after:
+
+| | built-in reader | Ghostscript | pdftotext |
+|---|---|---|---|
+| Words found (before) | **0** | 526 | 525 |
+| Words found (after) | **525** | 526 | 525 |
+| Valid UTF-8 (before) | **no** | yes | yes |
+| Findings on a pasted ChatGPT answer (before) | **3** | 8 | 10 |
+| Findings on a pasted ChatGPT answer (after) | **10** | **10** | 10 |
+| Questions found in a 3-question submission (before) | **1** | 4 | 3 |
+| Questions found (after) | **3** | **3** | **3** |
+
+All three tiers now agree. Ghostscript's "4" was a phantom question; pdftotext's "3" had
+silently lost Question 3 to a page break.
+
+### Seven defects in the built-in PDF reader
+
+Each has a `FIX-DG-PDF-*` comment in `classes/extractor.php` recording the measurement.
+
+1. **A single `\b` discarded about one stream in four, in every PDF.** The pattern for
+   locating stream data was `/\bstream\b([\s\S]*?)\bendstream\b/`. Stream data is
+   arbitrary compressed bytes and the PDF specification requires no end-of-line before the
+   `endstream` keyword, so whenever the last byte happened to be a letter, digit or
+   underscore there was no word boundary and the whole match failed - the object was
+   treated as having no stream at all. Roughly a quarter of bytes are word characters.
+   This is the defect behind the scrambled text: a font's character table ended in "M", was
+   dropped, and every word in that font was decoded with another font's table.
+2. **Indirect `/Font` references were not followed.** Word and LibreOffice write
+   `/Font 78 0 R`; only the inline form was searched for. With no per-font table the reader
+   fell back to a union of every font's table, which for subset fonts is not a degraded
+   mapping but a wrong one.
+3. **`/Length 66 0 R` was read as six bytes.** A regex backtracked into its own guard: the
+   digits matched "66", the indirect-reference lookahead was satisfied, and PCRE then
+   shortened the capture to "6". LibreOffice writes content-stream lengths this way, so
+   page 2 of every LibreOffice document truncated to nothing.
+4. **Objects inside a compressed `/ObjStm` were invisible.** Word packs its font
+   dictionaries there by default; an object index built by scanning raw bytes cannot see
+   inside a compressed stream.
+5. **`/Filter [/ASCII85Decode /FlateDecode]` was not applied in order.** Those documents
+   extracted as completely empty and were reported to the trainer as "may be
+   scanned/image-based" on a text PDF.
+6. **Two-byte character codes were read as one.** The width was guessed from whether any
+   key exceeded 255. Identity-H subset fonts - what Word embeds - are always two-byte but
+   usually have codes under 255, so every code was split in half: "Assessment Submission"
+   became "A\0s\0s\0e\0s\0s\0m\0e\0n\0t\0".
+7. **A space after every glyph.** For producers that position each letter individually -
+   a PDF printed through a browser - "Assessment" became "A s s e s s m e n t". Correct
+   letters, no words, so every check found nothing.
+
+Also fixed in the reader: ligature glyphs (`fi`, `ti`) decoding to U+FFFD, font resource
+names resolved per page rather than document-wide, nested resource dictionaries truncating
+before the fonts, short documents returned twice, and password-protected PDFs reported as
+such instead of as scans.
+
+### Four defects independent of which reader runs
+
+- **Markdown checks could not fire on indented text.** Four of the eight were anchored
+  `^\s{0,3}`. Ghostscript indents every line by seven spaces, so on any host without
+  poppler those four checks had never fired on any document since they were written.
+- **A cited Act section opened a phantom question and severed the real answer.** Line
+  wrapping puts "Section 28 of the Act" at the start of a line, which opened a section and
+  took the rest of the answer with it: Question 3 measured 49 bytes of a 213-byte answer,
+  and its similarity was computed on a quarter of what the student wrote.
+- **One page break could collapse per-question analysis for a whole submission.**
+- **A blank question sheet dropped out of copy detection entirely.** `parse()` returned an
+  empty array, and the caller stored `normtext => null` - so the submission was neither
+  compared against the cohort nor available for the cohort to be compared against.
+
+### OCR, optional
+
+Scanned PDFs and photographs of pages (.jpg, .png, .heic) are read when Tesseract is
+installed on the server, and reported clearly when it is not. Measured on a scanned
+pasted-ChatGPT submission: 9 of the 10 findings the original text layer produced survived
+OCR, including the markdown artefacts and the hallucinated "Work Health and Safety Act
+2015".
+
+Nothing else is required for the common case - DocGuard extracts the page image out of the
+PDF itself, so a phone-app scan needs Tesseract alone. Black-and-white copier scans also
+use Ghostscript. **Text PDFs and Word documents need nothing installed.**
+
+OCR-derived text is labelled wherever it is quoted. OCR renders "SIT30821" as "S1T30821"
+and every "I" as "|", and DocGuard quotes a student's own sentences back to a trainer in
+the verification questions they are meant to ask out loud.
+
+### A check that was written, measured and removed
+
+A function-word test was added to catch scrambled text that is otherwise well-formed.
+Against English it separated cleanly: correct extractions 0.288-0.576 of tokens, scrambled
+ones 0.097-0.149.
+
+Then it was measured against the other languages an Australian VET cohort writes in.
+French 0.024, Spanish 0.000, Vietnamese 0.025, Indonesian 0.000, German 0.056, Tagalog
+0.050, Somali 0.041, Swahili 0.000. **Every one below the scrambled text** - the check
+would have rejected genuine submissions from those students while accepting the garbage it
+existed to catch. Widening the word list only moves the hole to whichever language is not
+on it.
+
+Removed rather than tuned, and a test now fails if it comes back. The scrambling it aimed
+at is fixed at its source in this release.
+
+### Settings page
+
+The "Document reading" panel replaces the one-line tier banner. It states which reader is
+in use, whether anything needs doing, whether scanned work can be read, the exact install
+command for Debian/Ubuntu and RHEL/cPanel, and a table of every file type a student might
+submit with a plain verdict. It no longer asks for poppler-utils, because the measurements
+no longer support asking.
+
+### Verification
+
+- 168 tests, 472 assertions, 0 failures on the offline harness
+- **30 of 30 mutations caught.** Nine were not, at first: the fixtures used a single font,
+  and with one font the union fallback is identical to the correct per-font table, so seven
+  tests could not fail for the reason they named. The fixtures now use two subset fonts
+  with colliding glyph codes, which is the only shape in which these defects are visible.
+- 53 of 54 corpus extractions identical across all three tiers; the 54th is the
+  password-protected file, reported accurately
+
+
+## 1.2.4 - 2026-10-09
+
+**Moodle 5.3 support, verified by installing it.** Version `2026102300`. No schema change, no
+data change, no behaviour change.
+
+Moodle 5.3 was released on 5 October 2026 as a **long-term-support** version — the kind an RTO
+standardises on. DocGuard declared support only to 5.2, so it appeared as unsupported on the
+release its customers are most likely to adopt. `$plugin->supported` is now `[404, 503]`.
+`$plugin->requires` is unchanged: **Moodle 4.4 remains the floor**.
+
+### Verified, not assumed
+
+A clean Moodle 5.3 was installed (PHP 8.4.21, PHPUnit 11.5.56) and the plugin's own suite run
+against it.
+
+| | Moodle 5.2 | Moodle 5.3 |
+|---|---|---|
+| Tests | 245 | **247** |
+| Assertions | 1,051 | **1,134** |
+| Failures | 0 | **0** |
+
+The plugin's schema and all 31 upgrade steps also ran as part of that install, including the new
+`2026102300` step.
+
+### Two things the run found — both in test code, neither in the shipped plugin
+
+**Four tests called functions Moodle deprecated in 5.2.** `course_delete_module()` and
+`set_coursemodule_groupmode()`. On 5.3 they emit a deprecation that Moodle's PHPUnit integration
+reports as an unexpected `debugging()` call — four notices in an otherwise clean run.
+
+The replacement, `\core_courseformat\local\cmactions`, **does not exist before Moodle 5.2**, and
+this plugin supports 4.4 upwards. Neither call is correct everywhere. The tests now go through
+`docguard_delete_module()` and `docguard_set_groupmode()`, which choose at runtime via
+`class_exists()`. Nothing is suppressed and no warning is asserted away.
+
+**Twenty-nine PHPUnit deprecations, deliberately left.** Doc-comment metadata (`@covers`,
+`@dataProvider`) will not be supported in PHPUnit 12. The fix is PHP attributes — and attributes
+need PHPUnit 10 or later. **Moodle 4.4 and 4.5 ship PHPUnit 9.6, which ignores them entirely**,
+so converting now would stop the data providers running on the two oldest supported versions,
+silently and without any error. Deprecation notices on the newest Moodle are the right trade for
+tests that actually execute on the oldest. A test records the decision so it is revisited
+deliberately when the floor passes Moodle 5.0.
+
+**Production code calls nothing deprecated on 5.3.** The only matches for those function names
+outside the test directory are in explanatory comments.
+
+### Deployment notes for sites moving to 5.3
+
+Neither is a plugin matter, but both will be met on the way:
+
+- Moodle 5.3 requires **PHP 8.3+** and **PostgreSQL 17 / MariaDB 11.4 / MySQL 8.4**.
+- Moodle 5.3 moves the web root into a `public/` directory, so the plugin installs at
+  **`public/plagiarism/docguard`**.
+
+### Also guarded
+
+A new test fails if any test file calls the deprecated functions directly, or if the runtime
+`class_exists()` branch is removed from either compatibility helper — because deleting the old
+branch, now that 5.3 is the version in front of you, breaks the suite on the 4.4 floor where
+nobody would notice without installing 4.4.
+
+**247 tests passing, 0 failures on both Moodle 5.2 and 5.3. 47 of 47 mutations caught.**
+
+---
+
 ## 1.2.3 - 2026-10-08
 
 **The rest of the customer-facing text.** Version `2026102200`. No schema, data or behaviour

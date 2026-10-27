@@ -265,7 +265,7 @@ final class task_scan_activity_test extends \advanced_testcase {
         $act = $this->create_docguard_assign();
         $cmid = (int)$act['cm']->id;
         $contextid = (int)$act['context']->id;
-        course_delete_module($cmid);
+        $this->docguard_delete_module((int)$cmid);
 
         $output = $this->run_with(['cmid' => $cmid, 'contextid' => $contextid]);
         $this->assertStringContainsString('no longer exists', $output);

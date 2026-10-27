@@ -1235,5 +1235,110 @@ function xmldb_plagiarism_docguard_upgrade($oldversion) {
         upgrade_plugin_savepoint(true, 2026102200, 'plagiarism', 'docguard');
     }
 
+    if ($oldversion < 2026102300) {
+        /*
+         * V1.2.4: Moodle 5.3 support. No schema change, no data change, no behaviour change.
+         *
+         * Moodle 5.3 was released on 5 October 2026 as a long-term-support version, which is
+         * the kind an RTO actually standardises on. The plugin declared support only to 5.2, so
+         * it showed as unsupported on the release its customers are most likely to adopt.
+         * $plugin->supported is now [404, 503]; $plugin->requires is unchanged, so Moodle 4.4
+         * remains the floor.
+         *
+         * VERIFIED, not assumed. A clean Moodle 5.3 was installed (PHP 8.4, PHPUnit 11.5) and
+         * the plugin's own suite run against it: 245 tests, 1,051 assertions, zero failures -
+         * identical to the result on 5.2. The plugin's schema and all 31 upgrade steps also ran
+         * as part of that install.
+         *
+         * TWO THINGS THE RUN FOUND, both in test code, neither affecting the shipped plugin:
+         *
+         * 1. Four tests called course_delete_module() and set_coursemodule_groupmode(), which
+         *    Moodle deprecated in 5.2. On 5.3 they emit a deprecation that Moodle's PHPUnit
+         *    integration reports as an unexpected debugging() call. The replacement,
+         *    \core_courseformat\local\cmactions, does not exist before 5.2, and this plugin
+         *    supports 4.4 upwards - so neither call is correct everywhere. The tests now go
+         *    through docguard_delete_module() and docguard_set_groupmode(), which choose at
+         *    runtime via class_exists(). Nothing is suppressed and no warning is asserted away.
+         *
+         * 2. Twenty-nine PHPUnit deprecations: doc-comment metadata (@covers, @dataProvider)
+         *    will not be supported in PHPUnit 12. The fix is PHP attributes, and attributes
+         *    need PHPUnit 10 or later. Moodle 4.4 and 4.5 ship PHPUnit 9.6, which ignores them
+         *    entirely - converting now would stop the data providers running on the two oldest
+         *    supported versions, silently. Deprecation notices on the newest Moodle are the
+         *    right trade for tests that actually execute on the oldest. A test records the
+         *    decision so it is revisited when the floor passes Moodle 5.0.
+         *
+         * PRODUCTION CODE CALLS NOTHING DEPRECATED on 5.3. The only matches for the deprecated
+         * function names outside tests are in explanatory comments.
+         *
+         * Two deployment notes for sites moving to 5.3, neither a plugin matter: 5.3 requires
+         * PHP 8.3 or later and PostgreSQL 17 / MariaDB 11.4 / MySQL 8.4, and it moves the web
+         * root into a public/ directory, so the plugin installs at public/plagiarism/docguard.
+         */
+        upgrade_plugin_savepoint(true, 2026102300, 'plagiarism', 'docguard');
+    }
+
+    if ($oldversion < 2026102700) {
+        /*
+         * V1.2.5. No schema change, no data change. The savepoint exists because the
+         * version integer moved, and db/upgrade.php must have a step that matches it - see
+         * the note at the top of this file about v1.0.87, which shipped a version with no
+         * matching savepoint and left sites running an upgrade with nothing in it.
+         *
+         * WHAT THIS RELEASE CHANGES is how PDFs are READ, and nothing about what is stored.
+         *
+         * It began as a customer question: their server has Ghostscript but not
+         * poppler-utils, and DocGuard's settings page was telling them to install it.
+         * Measuring whether that advice was worth acting on meant running all three
+         * extraction tiers over the same documents, and the comparison found that the
+         * built-in reader was not merely lower quality - it was returning SCRAMBLED TEXT,
+         * and the plugin was accepting it. "Student name" arrived as "Asemnts tCon".
+         *
+         * Seven defects in the reader were behind it, each with its own FIX-DG-PDF-*
+         * comment in classes/extractor.php:
+         *
+         *  - a `\b` before "endstream" in the stream-extraction pattern. Stream data is
+         *    arbitrary bytes and the specification requires no end-of-line before the
+         *    keyword, so whenever the last byte was a letter or digit the whole match
+         *    failed and the stream was treated as absent. That silently discarded about
+         *    ONE STREAM IN FOUR in every PDF.
+         *  - /Font written as an indirect reference, which Word and LibreOffice both do,
+         *    was not followed, so no per-font character table was built.
+         *  - a regex backtracking into its own guard read "/Length 66 0 R" as six bytes,
+         *    truncating page content to nothing on every LibreOffice document.
+         *  - objects packed inside a compressed /ObjStm, which is Word's default, were
+         *    invisible to the object index.
+         *  - a /Filter chain such as [/ASCII85Decode /FlateDecode] was not applied in
+         *    order, so those documents extracted as completely empty.
+         *  - the character-code width was guessed from the key values rather than read
+         *    from the CMap's own codespacerange, so two-byte Identity-H codes - what Word
+         *    embeds - were read as two one-byte codes.
+         *  - a space was emitted after every glyph for producers that position letters
+         *    individually, turning "Assessment" into "A s s e s s m e n t".
+         *
+         * With those fixed the built-in reader produces text identical to pdftotext on 17
+         * of 18 corpus documents; the eighteenth is password-protected and is now reported
+         * as such instead of as a scan. The settings page no longer asks for poppler-utils,
+         * because the measurement no longer supports asking.
+         *
+         * Four further defects were found on the way, independent of which reader runs:
+         * markdown checks that could not fire on indented text, a cited "Section 28 of the
+         * Act" opening a phantom question and severing the real answer, a page break
+         * collapsing per-question analysis, and parse() returning nothing - which dropped
+         * the submission out of copy detection entirely - for a blank question sheet.
+         *
+         * ALSO NEW, and optional: OCR. Scanned PDFs and photographs of pages are read when
+         * Tesseract is installed, and reported clearly when it is not. Nothing else is
+         * required for the common case, because DocGuard extracts the page image from the
+         * PDF itself. OCR-derived text is labelled as such wherever it is quoted, since OCR
+         * does not reproduce a student's wording exactly.
+         *
+         * Existing stored results are untouched and no re-analysis is triggered. A
+         * submission already analysed keeps its result; anything analysed from now on is
+         * read by the fixed reader.
+         */
+        upgrade_plugin_savepoint(true, 2026102700, 'plagiarism', 'docguard');
+    }
+
     return true;
 }

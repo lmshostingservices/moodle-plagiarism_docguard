@@ -240,6 +240,26 @@ class analyser {
             'overall_score'    => $overallscore,
             'overall_level'    => $overalllevel,
             'extraction_chars' => strlen($text),
+            /*
+             * V1.2.5. HOW the text was obtained, stamped on the row beside what was found
+             * in it.
+             *
+             * This exists because OCR text must never be presented as the student's exact
+             * words. DocGuard quotes a student's own sentences back to a trainer twice
+             * over: in the evidence beside a finding, and in the verification questions a
+             * trainer is meant to ask out loud. OCR does not reproduce those sentences
+             * exactly - measured on a scanned submission, "SIT30821" came back as
+             * "S1T30821" and every "I" as "|". Reading that aloud as the student's own
+             * wording, in a conversation about their conduct, would be putting words in
+             * their mouth.
+             *
+             * Stored rather than recomputed, because the file may be gone by the time the
+             * report is opened, and because a submission analysed before this release must
+             * not be relabelled retrospectively: a row with no stamp is a row whose method
+             * is unknown, and the report says nothing rather than assuming.
+             */
+            'extraction_method' => extractor::last_method(),
+            'extraction_is_ocr' => extractor::last_was_ocr(),
             'authenticity'     => [
                 'findings'   => $authfindings,
                 'tally'      => authenticity::tally($authfindings),

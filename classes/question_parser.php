@@ -51,17 +51,43 @@ class question_parser {
         // Normalise line endings.
         $text = str_replace(["\r\n", "\r"], "\n", $text);
 
-        $sections = self::try_labelled($text);
+        /*
+         * V1.2.5 FIX-DG-PARSE-ALL-SHORT. Both branches below used to `return
+         * filter_short($sections)` directly. filter_short() drops every section under
+         * MIN_SECTION_CHARS, so when a document had two or more markers and all of the
+         * resulting sections were short, this method returned an EMPTY ARRAY for a
+         * document that plainly had text in it.
+         *
+         * The caller treats an empty result as a failure and gives up on the submission:
+         * analyser::analyse_file() returns status 'error' with "No sections could be
+         * identified in the document." AND normtext => null. The null is the part that
+         * matters. A submission with no stored normtext is invisible to cross-student
+         * comparison - it is neither compared against the cohort nor available for the
+         * cohort to be compared against - and it contributes nothing to deriving the
+         * assessment template either.
+         *
+         * The trigger is ordinary, not exotic: a student who uploads the question sheet
+         * with the answers still blank, or a cover sheet and marking grid on their own.
+         * Both are everyday wrong-file submissions. The same text with NO question markers
+         * at all was handled correctly, as one Full Document section - so having structure
+         * made DocGuard do less with the file, not more.
+         *
+         * Falling through to the Full Document fallback is what the rest of this method
+         * already does for every other "cannot find structure" case. The document is then
+         * analysed whole, its normtext is stored, and the trainer sees a result rather
+         * than an error.
+         */
+        $sections = self::filter_short(self::try_labelled($text));
         if (count($sections) >= 2) {
-            return self::filter_short($sections);
+            return $sections;
         }
 
-        $sections = self::try_numbered($text);
+        $sections = self::filter_short(self::try_numbered($text));
         if (count($sections) >= 2) {
-            return self::filter_short($sections);
+            return $sections;
         }
 
-        // No clear structure — treat entire document as a single section.
+        // No usable structure — treat entire document as a single section.
         $cleaned = trim($text);
         if ($cleaned === '') {
             return [];
@@ -126,16 +152,69 @@ class question_parser {
         // sentence still cannot open a section; only leading horizontal whitespace is
         // now tolerated. \t as well as space, because tab-indented text is common in
         // DOCX extraction.
-        $pattern = '/^[ \t]*(?:'
-            . 'Question\s+(\d+)'
-            . '|Q\.?\s*(\d+)'
-            . '|Activity\s+(\d+)'
-            . '|Task\s+(\d+)'
-            . '|Section\s+(\d+)'
-            . '|Part\s+(\d+)'
-            . '|Answer\s+(\d+)'
-            . '|Response\s+(\d+)'
-            . ')[\s:.\-)]*/im';
+        // V1.2.5 FIX-DG-PAGEBREAK-MARKERS: \x0c (form feed) joins space and tab in the
+        // tolerated leading whitespace. `pdftotext` emits a form feed at every page
+        // boundary and attaches it to the first line of the next page, so a question that
+        // happened to start a page arrived as "\x0cQuestion 3:" and did not match.
+        //
+        // The effect was not confined to that one question. try_labelled() needs two or
+        // more sections before parse() will use its result, so on a document whose page
+        // breaks stranded enough markers, the whole submission collapsed to a single
+        // "Full Document" section. Measured: one form feed before "Question 2" of a
+        // two-question submission was enough to lose per-question analysis entirely.
+        // Multi-page submissions are the normal case, not the exception.
+        //
+        // V1.2.5 FIX-DG-CITED-SECTION-NUMBER: the marker must not be followed by a
+        // LOWERCASE word. The anchor alone was never enough, because line wrapping turns
+        // mid-sentence text into start-of-line text:
+        //
+        //     "The duty on workers is set out in
+        //      Section 28 of the Act, which is the part that applies to me."
+        //
+        // "Section 28" starts its own line, so it opened a new section - and because a
+        // section runs until the next marker, it also SEVERED the answer it was part of.
+        // Measured on a three-question submission: Question 3's text dropped from 213
+        // bytes to 49, the other 77% being attributed to a phantom "Section 28" section,
+        // and its per-question similarity was then computed on a quarter of what the
+        // student wrote. "Part 2 of the Code" and "Task 1 is complete" do the same thing,
+        // and citing a section of an Act is routine in exactly the WHS and food-safety
+        // units this plugin serves.
+        //
+        // A heading reads "Question 3:", "Question 3" alone, or "Question 3 Describe the
+        // hazard" - a colon, the end of the line, or a capitalised word. Cited prose
+        // reads "Section 28 of", "Part 2 of", "Task 1 is" - a lowercase word, every time.
+        // That is the distinction, and it keeps the safe-failure property the anchor was
+        // chosen for: when this is wrong the parser returns one Full Document section, so
+        // everything is still analysed and nothing is mis-attributed.
+        // Every quantifier here is POSSESSIVE, and that is the whole reason the lookahead
+        // works. Written the obvious way - `(\d+)[\s:.\-)]*(?![a-z])` - the guard is
+        // worthless, and in two separate ways:
+        //
+        //  - `[\s:.\-)]*` backtracks. On "Question 1 of 3" it first consumes the space,
+        //    the lookahead sees "o" and fails, so PCRE gives the space back; the lookahead
+        //    then sees the space itself, which is not a lowercase letter, and SUCCEEDS.
+        //  - `(\d+)` backtracks too. On "Section 28 of" the capture shrinks from "28" to
+        //    "2", the lookahead lands on "8", and succeeds the same way.
+        //
+        // Both were measured: with greedy quantifiers the pattern matched all 23 test
+        // lines, prose and headings alike, so the guard may as well not have been there.
+        // Possessive quantifiers refuse to give back what they matched, so the lookahead
+        // is tested where it was meant to be - immediately after the marker.
+        //
+        // `(?-i:[a-z])` turns case-insensitivity OFF inside the lookahead. The pattern
+        // needs /i for "QUESTION 1" and "question 1", but under /i a plain `[a-z]`
+        // matches capitals too, which rejects every real heading: "Question 1: Describe"
+        // fails on the "D". Measured as 6 of 23 lines wrong before this was scoped.
+        $pattern = '/^[ \t\x0c]*(?:'
+            . 'Question\s++(\d++)'
+            . '|Q\.?\s*+(\d++)'
+            . '|Activity\s++(\d++)'
+            . '|Task\s++(\d++)'
+            . '|Section\s++(\d++)'
+            . '|Part\s++(\d++)'
+            . '|Answer\s++(\d++)'
+            . '|Response\s++(\d++)'
+            . ')[\s:.\-)]*+(?!(?-i:[a-z]))/im';
 
         $lines   = explode("\n", $text);
         $chunks  = [];
@@ -159,7 +238,11 @@ class question_parser {
                 // every section was labelled "Section N" regardless of what it actually
                 // said, so a teacher looking at "Question 2" in the document saw
                 // "Section 2" in the report.
-                $labelword = preg_match('/^[ \t]*(Question|Q\.?|Activity|Task|Section|Part|Answer|Response)/i', $line, $lm)
+                // V1.2.5: the same leading-whitespace set as the marker pattern above,
+                // form feed included. A mismatch here does not drop the section - it
+                // mislabels it, which is the V1.0.86 bug in another guise: a page-break
+                // "Question 3" would be reported to the trainer as "Section 3".
+                $labelword = preg_match('/^[ \t\x0c]*(Question|Q\.?|Activity|Task|Section|Part|Answer|Response)/i', $line, $lm)
                     ? $lm[1] : 'Section';
                 $current = ['label' => trim($labelword . ' ' . $num), 'num' => $num];
                 $buf     = [$line];

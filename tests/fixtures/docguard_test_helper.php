@@ -244,4 +244,58 @@ trait docguard_test_helper {
         ], $overrides);
         return (int)$DB->insert_record('plagiarism_docguard_sec', $record);
     }
+
+    /**
+     * Delete a course module, whichever API this Moodle offers.
+     *
+     * V1.2.4. Moodle 5.2 deprecated course_delete_module() in favour of
+     * \core_courseformat\local\cmactions::delete(), and on 5.3 the old function emits a
+     * deprecation notice that Moodle's own PHPUnit integration reports as an unexpected
+     * debugging() call. This plugin supports Moodle 4.4 upwards and cmactions does not exist
+     * before 5.2, so neither call works everywhere and the choice has to be made at runtime.
+     *
+     * Not suppressed, and not silenced with assertDebuggingCalled(): a warning Moodle emits is
+     * information, and hiding it here is how a plugin arrives at a release where the warning
+     * was real.
+     *
+     * @param int $cmid Course module id.
+     * @param \stdClass|null $course The course, needed by the newer API.
+     * @return void
+     */
+    protected function docguard_delete_module(int $cmid, ?\stdClass $course = null): void {
+        global $DB;
+
+        if (class_exists('\\core_courseformat\\local\\cmactions')) {
+            if ($course === null) {
+                $courseid = (int)$DB->get_field('course_modules', 'course', ['id' => $cmid], MUST_EXIST);
+                $course = get_course($courseid);
+            }
+            (new \core_courseformat\local\cmactions($course))->delete($cmid);
+            return;
+        }
+
+        course_delete_module($cmid);
+    }
+
+    /**
+     * Set a course module's group mode, whichever API this Moodle offers.
+     *
+     * Same reasoning as docguard_delete_module(): set_coursemodule_groupmode() was deprecated
+     * in 5.2, and its replacement does not exist on the 4.4 floor.
+     *
+     * @param int $cmid Course module id.
+     * @param int $groupmode One of NOGROUPS, SEPARATEGROUPS or VISIBLEGROUPS.
+     * @return void
+     */
+    protected function docguard_set_groupmode(int $cmid, int $groupmode): void {
+        global $DB;
+
+        if (class_exists('\\core_courseformat\\local\\cmactions')) {
+            $courseid = (int)$DB->get_field('course_modules', 'course', ['id' => $cmid], MUST_EXIST);
+            (new \core_courseformat\local\cmactions(get_course($courseid)))->set_groupmode($cmid, $groupmode);
+            return;
+        }
+
+        set_coursemodule_groupmode($cmid, $groupmode);
+    }
 }

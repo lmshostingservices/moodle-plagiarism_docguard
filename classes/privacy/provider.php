@@ -279,6 +279,22 @@ class provider implements core_userlist_provider, metadata_provider, plugin_prov
                 if (is_array($analysis) && !empty($analysis['authenticity'])) {
                     $auth = $analysis['authenticity'];
                     $authenticity = [
+                        /*
+                         * V1.2.5: how the text was obtained.
+                         *
+                         * Included for the same reason as everything else in this block.
+                         * The excerpts below are attributed to the student, and when they
+                         * came from OCR they are not the student's exact characters. A
+                         * student contesting a referral has to be able to see that the
+                         * words being quoted at them were produced by character
+                         * recognition, so they can challenge the reading rather than be
+                         * left arguing about writing they did not produce.
+                         *
+                         * Absent on rows analysed before this release, where the method is
+                         * genuinely unknown and is reported as unknown rather than guessed.
+                         */
+                        'how_the_text_was_read' => $analysis['extraction_method'] ?? null,
+                        'text_read_by_ocr'      => $analysis['extraction_is_ocr'] ?? null,
                         'checks_version' => $auth['checks_version'] ?? null,
                         'findings'       => array_values(array_map(static function ($finding) {
                             return [
