@@ -43,6 +43,7 @@ defined('MOODLE_INTERNAL') || die();
  * Assembles minimal single-purpose PDF files for the extractor tests.
  */
 class docguard_pdf_fixture {
+
     /** @var array<int, string> Object bodies, keyed by object number. */
     private $objects = [];
 

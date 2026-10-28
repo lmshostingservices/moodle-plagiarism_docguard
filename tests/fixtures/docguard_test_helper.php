@@ -251,12 +251,31 @@ trait docguard_test_helper {
      * V1.2.4. Moodle 5.2 deprecated course_delete_module() in favour of
      * \core_courseformat\local\cmactions::delete(), and on 5.3 the old function emits a
      * deprecation notice that Moodle's own PHPUnit integration reports as an unexpected
-     * debugging() call. This plugin supports Moodle 4.4 upwards and cmactions does not exist
-     * before 5.2, so neither call works everywhere and the choice has to be made at runtime.
+     * debugging() call. This plugin supports Moodle 4.4 upwards, so neither call works
+     * everywhere and the choice has to be made at runtime.
      *
-     * Not suppressed, and not silenced with assertDebuggingCalled(): a warning Moodle emits is
-     * information, and hiding it here is how a plugin arrives at a release where the warning
-     * was real.
+     * V1.2.6 FIX-DG-CMACTIONS-METHOD: the runtime test is method_exists(), NOT
+     * class_exists(), and the difference was a release blocker.
+     *
+     * 1.2.4 asked `class_exists('\core_courseformat\local\cmactions')`, on the stated
+     * reasoning that the class "does not exist before 5.2". It does. On Moodle 4.4 the
+     * class is right there, at course/format/classes/local/cmactions.php, carrying exactly
+     * one method: rename(). delete() and set_groupmode() were added later. So on the
+     * plugin's own declared FLOOR the guard passed, the newer branch was taken, and the
+     * suite died with "Call to undefined method
+     * core_courseformat\local\cmactions::delete()" - four errors on Moodle 4.4.
+     *
+     * Nobody saw it because 1.2.4 and 1.2.5 were verified on 5.3 only. The release that
+     * said "Moodle 4.4 remains the floor, so no existing site loses support" was never run
+     * on 4.4. This is test-only code, so no customer site was ever affected - but it meant
+     * the floor could not be verified at all, and an untestable floor is an undefended one.
+     *
+     * The lesson is narrow and worth keeping: a feature test must ask about the thing being
+     * called. The class is not the API. The method is.
+     *
+     * Not suppressed, and not silenced with assertDebuggingCalled(): a warning Moodle emits
+     * is information, and hiding it here is how a plugin arrives at a release where the
+     * warning was real.
      *
      * @param int $cmid Course module id.
      * @param \stdClass|null $course The course, needed by the newer API.
@@ -265,7 +284,7 @@ trait docguard_test_helper {
     protected function docguard_delete_module(int $cmid, ?\stdClass $course = null): void {
         global $DB;
 
-        if (class_exists('\\core_courseformat\\local\\cmactions')) {
+        if (method_exists('\\core_courseformat\\local\\cmactions', 'delete')) {
             if ($course === null) {
                 $courseid = (int)$DB->get_field('course_modules', 'course', ['id' => $cmid], MUST_EXIST);
                 $course = get_course($courseid);
@@ -280,8 +299,10 @@ trait docguard_test_helper {
     /**
      * Set a course module's group mode, whichever API this Moodle offers.
      *
-     * Same reasoning as docguard_delete_module(): set_coursemodule_groupmode() was deprecated
-     * in 5.2, and its replacement does not exist on the 4.4 floor.
+     * Same reasoning as docguard_delete_module(), including V1.2.6
+     * FIX-DG-CMACTIONS-METHOD: the test is on the METHOD. On Moodle 4.4 the cmactions
+     * class exists with only rename(), so a class_exists() guard sends 4.4 down the branch
+     * that calls a method it does not have.
      *
      * @param int $cmid Course module id.
      * @param int $groupmode One of NOGROUPS, SEPARATEGROUPS or VISIBLEGROUPS.
@@ -290,7 +311,7 @@ trait docguard_test_helper {
     protected function docguard_set_groupmode(int $cmid, int $groupmode): void {
         global $DB;
 
-        if (class_exists('\\core_courseformat\\local\\cmactions')) {
+        if (method_exists('\\core_courseformat\\local\\cmactions', 'set_groupmode')) {
             $courseid = (int)$DB->get_field('course_modules', 'course', ['id' => $cmid], MUST_EXIST);
             (new \core_courseformat\local\cmactions(get_course($courseid)))->set_groupmode($cmid, $groupmode);
             return;

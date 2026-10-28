@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.6 - 2026-10-28
+
+**Release number only.** Version `2026102800`. The code is 1.2.5, below, unchanged.
+
+The build pipeline refused the 1.2.5 upload: a 1.2.5 at numeric `2026102700` was already
+promoted with a different SHA-256, and promoted release bytes are immutable. Reusing a
+release number for different bytes is exactly what that rule prevents — two sites both
+reporting "1.2.5" while running different code cannot be told apart from a support ticket.
+
+So the number was bumped rather than the artefact reworked. Everything described under
+1.2.5 is what this release contains.
+
+Verified on **Moodle 4.4, 4.5, 5.2 and 5.3** — the full declared support range, including
+the two versions that ship PHPUnit 9.6.
+
+
 ## 1.2.5 - 2026-10-27
 
 **DocGuard reads PDFs properly on its own, and can read scanned work.** Version

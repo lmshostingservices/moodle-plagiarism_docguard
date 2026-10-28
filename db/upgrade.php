@@ -1340,5 +1340,22 @@ function xmldb_plagiarism_docguard_upgrade($oldversion) {
         upgrade_plugin_savepoint(true, 2026102700, 'plagiarism', 'docguard');
     }
 
+    if ($oldversion < 2026102800) {
+        /*
+         * V1.2.6. No schema change, no data change, and NO CODE CHANGE from 1.2.5 beyond
+         * this step and the version integer.
+         *
+         * The release number moved because the build pipeline refused the 1.2.5 upload:
+         * a 1.2.5 at numeric 2026102700 was already promoted with a different SHA-256, and
+         * promoted release bytes are immutable. Reusing a release number for different
+         * bytes is the thing that rule exists to prevent - two sites both reporting
+         * "1.2.5" while running different code is unfalsifiable from a support ticket.
+         *
+         * So the number is bumped rather than the artefact reworked. Everything described
+         * under 1.2.5 in the CHANGELOG is what this release contains.
+         */
+        upgrade_plugin_savepoint(true, 2026102800, 'plagiarism', 'docguard');
+    }
+
     return true;
 }

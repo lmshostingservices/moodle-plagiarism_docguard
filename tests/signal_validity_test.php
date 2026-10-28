@@ -1265,9 +1265,59 @@ final class signal_validity_test extends \advanced_testcase {
         }
         $this->assertStringContainsString('cmactions', $helper,
             'The helpers must use the 5.2+ API when it is available.');
-        $this->assertSame(2, preg_match_all('/class_exists\(/', $helper),
-            'Each helper must pick its API at runtime. Removing the class_exists() check '
-            . 'breaks the suite on Moodle 4.4 and 4.5, where cmactions does not exist.');
+
+        /*
+         * V1.2.6 FIX-DG-CMACTIONS-METHOD. Until this release this read:
+         *
+         *     $this->assertSame(2, preg_match_all('/class_exists\(/', $helper),
+         *         '... breaks the suite on Moodle 4.4 and 4.5, where cmactions does not
+         *          exist.');
+         *
+         * The guard REQUIRED the defect, and asserted a falsehood as its justification.
+         * \core_courseformat\local\cmactions DOES exist on Moodle 4.4 - at
+         * course/format/classes/local/cmactions.php - carrying one method, rename(). So the
+         * class check passed on the plugin's own floor, the 5.2 branch was taken, and the
+         * suite died with "Call to undefined method ...::delete()": four errors on 4.4.
+         *
+         * A test that pins the wrong behaviour in place is worse than no test, because it
+         * makes the correct fix look like a regression. Both directions are asserted now:
+         * the method test must be there, and the class test must not come back.
+         *
+         * Needles assembled at runtime so this test cannot match its own source - a trap
+         * this project has fallen into six times.
+         */
+        $methodtest = 'method' . '_exists';
+        $classtest  = 'class' . '_exists';
+
+        // Comments stripped before counting, as the loop above does for the test files.
+        // These helpers' docblocks explain the distinction and therefore NAME both
+        // functions; counting those as code made this assertion fail on its own
+        // explanation, which is a self-matching trap one step removed.
+        $helpercode = implode("\n", array_filter(
+            explode("\n", $helper),
+            fn($l) => !preg_match('~^\s*(\*|//|/\*)~', $l)
+        ));
+
+        $this->assertSame(
+            2,
+            preg_match_all('/' . $methodtest . '\s*\(/', $helpercode),
+            'Each helper must choose its API by asking whether the METHOD exists. The '
+            . 'cmactions class is present on Moodle 4.4 with only rename(), so a '
+            . 'class-existence check sends the floor down the branch that calls delete().'
+        );
+        $this->assertSame(
+            0,
+            preg_match_all('/' . $classtest . '\s*\(\s*[\'"\\\\]*core_courseformat/', $helpercode),
+            'A class-existence check on cmactions is the 1.2.4 defect: the class exists on '
+            . 'Moodle 4.4, the methods do not.'
+        );
+        foreach (['delete', 'set_groupmode'] as $method) {
+            $this->assertMatchesRegularExpression(
+                '/' . $methodtest . '\s*\([^)]*,\s*[\'"]' . $method . '[\'"]\s*\)/',
+                $helpercode,
+                'The guard for ' . $method . '() must name that method, not another one.'
+            );
+        }
     }
 
     /**
